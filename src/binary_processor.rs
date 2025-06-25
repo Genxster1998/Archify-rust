@@ -1,56 +1,74 @@
 use crate::types::{BinaryInfo, LogLevel, LogMessage};
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::process::Command;
+use std::fs;
+use goblin::mach::Mach;
+use goblin::Object;
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, error, info, warn};
+use goblin::mach::constants::cputype::*;
+
+// Define missing cpusubtype constants if not present in goblin
+const CPU_SUBTYPE_ARM64E: u32 = 2;
 
 pub struct BinaryProcessor;
 
 impl BinaryProcessor {
-    /// Check if a file is a Mach-O binary
+    /// Check if a file is a Mach-O binary using goblin
     pub fn is_mach_binary(path: &Path) -> Result<bool> {
         if !path.exists() {
             return Ok(false);
         }
-
-        // Check if it's a symbolic link
         if path.is_symlink() {
             return Ok(false);
         }
-
-        // Use the `file` command to check if it's a Mach-O binary
-        let output = Command::new("file")
-            .arg("--mime-type")
-            .arg(path)
-            .output()
-            .context("Failed to execute file command")?;
-
-        let mime_type = String::from_utf8_lossy(&output.stdout);
-        Ok(mime_type.contains("application/x-mach-binary"))
+        let data = match fs::read(path) {
+            Ok(d) => d,
+            Err(_) => return Ok(false),
+        };
+        match Object::parse(&data) {
+            Ok(Object::Mach(_)) => Ok(true),
+            _ => Ok(false),
+        }
     }
 
-    /// Get architectures present in a binary
-    pub fn get_architectures(path: &Path) -> Result<Vec<String>> {
-        let output = Command::new("lipo")
-            .arg("-info")
-            .arg(path)
-            .output()
-            .context("Failed to execute lipo -info")?;
+    /// Helper to map cputype/cpusubtype to architecture string
+    fn arch_name(cputype: u32, cpusubtype: u32) -> String {
+        // Mask off the high bit (capability bit) for cpusubtype
+        let masked_subtype = cpusubtype & 0x7FFFFFFF;
+        match (cputype, masked_subtype) {
+            (CPU_TYPE_X86_64, _) => "x86_64".to_string(),
+            (CPU_TYPE_X86, 3) => "i386".to_string(), // CPU_SUBTYPE_I386_ALL = 3
+            (CPU_TYPE_X86, 8) => "x86_64h".to_string(), // CPU_SUBTYPE_X86_64_H = 8
+            (CPU_TYPE_ARM64, 0) => "arm64".to_string(), // CPU_SUBTYPE_ARM64_ALL = 0
+            (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E) => "arm64e".to_string(),
+            (CPU_TYPE_ARM, 9) => "armv7".to_string(), // CPU_SUBTYPE_ARM_V7 = 9
+            (CPU_TYPE_ARM, 11) => "armv7s".to_string(), // CPU_SUBTYPE_ARM_V7S = 11
+            (CPU_TYPE_ARM, 12) => "armv7k".to_string(), // CPU_SUBTYPE_ARM_V7K = 12
+            (CPU_TYPE_ARM, 6) => "armv6".to_string(), // CPU_SUBTYPE_ARM_V6 = 6
+            (CPU_TYPE_ARM, 13) => "armv8".to_string(), // CPU_SUBTYPE_ARM_V8 = 13
+            (CPU_TYPE_ARM, _) => "arm".to_string(),
+            _ => format!("{}:{}", cputype, cpusubtype),
+        }
+    }
 
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        
-        // Parse the output: "Non-fat file: /path/to/file is architecture: x86_64"
-        // or "Architectures in the fat file: /path/to/file are: x86_64 arm64"
-        if let Some(archs_part) = output_str.split(':').last() {
-            let archs: Vec<String> = archs_part
-                .trim()
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect();
-            Ok(archs)
-        } else {
-            Ok(Vec::new())
+    /// Get architectures present in a binary using goblin
+    pub fn get_architectures(path: &Path) -> Result<Vec<String>> {
+        let data = fs::read(path).context("Failed to read binary file")?;
+        match Object::parse(&data) {
+            Ok(Object::Mach(Mach::Fat(fat))) => {
+                let mut archs = Vec::new();
+                for arch_result in fat.iter_arches() {
+                    if let Ok(arch) = arch_result {
+                        archs.push(Self::arch_name(arch.cputype, arch.cpusubtype));
+                    }
+                }
+                Ok(archs)
+            }
+            Ok(Object::Mach(Mach::Binary(_mach))) => {
+                Ok(vec![Self::arch_name(_mach.header.cputype(), _mach.header.cpusubtype())])
+            }
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -62,28 +80,25 @@ impl BinaryProcessor {
 
     /// Get detailed architecture information including sizes
     pub fn get_detailed_info(path: &Path) -> Result<BinaryInfo> {
-        let output = Command::new("lipo")
-            .arg("-detailed_info")
-            .arg(path)
-            .output()
-            .context("Failed to execute lipo -detailed_info")?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
         let archs = Self::get_architectures(path)?;
         let is_universal = archs.len() > 1;
 
         // Parse detailed info to get sizes
         let mut total_size = 0u64;
-        let lines: Vec<&str> = output_str.lines().collect();
-        
-        for line in lines {
-            if line.contains("size") {
-                if let Some(size_str) = line.split_whitespace().find(|s| s.parse::<u64>().is_ok()) {
-                    if let Ok(size) = size_str.parse::<u64>() {
-                        total_size += size;
+        let data = fs::read(path).context("Failed to read binary file")?;
+        match Object::parse(&data) {
+            Ok(Object::Mach(Mach::Fat(fat))) => {
+                for arch_result in fat.iter_arches() {
+                    if let Ok(arch) = arch_result {
+                        total_size += arch.size as u64;
                     }
                 }
             }
+            Ok(Object::Mach(Mach::Binary(_mach))) => {
+                // Use file size for single-arch
+                total_size = data.len() as u64;
+            }
+            _ => {}
         }
 
         Ok(BinaryInfo {
@@ -96,39 +111,21 @@ impl BinaryProcessor {
 
     /// Calculate the size of architectures that can be removed
     pub fn calculate_removable_size(path: &Path, target_arch: &str) -> Result<u64> {
-        let output = Command::new("lipo")
-            .arg("-detailed_info")
-            .arg(path)
-            .output()
-            .context("Failed to execute lipo -detailed_info")?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
+        let data = fs::read(path).context("Failed to read binary file")?;
         let mut removable_size = 0u64;
-        let mut current_arch: Option<String> = None;
-
-        for line in output_str.lines() {
-            let line = line.trim();
-            
-            if line.starts_with("architecture") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    current_arch = Some(parts[1].to_string());
-                }
-            } else if line.contains("size") && current_arch.is_some() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let Some(size_index) = parts.iter().position(|&s| s == "size") {
-                    if size_index + 1 < parts.len() {
-                        if let Ok(size) = parts[size_index + 1].parse::<u64>() {
-                            let arch = current_arch.as_ref().unwrap();
-                            if arch != target_arch {
-                                removable_size += size;
-                            }
+        match Object::parse(&data) {
+            Ok(Object::Mach(Mach::Fat(fat))) => {
+                for arch_result in fat.iter_arches() {
+                    if let Ok(arch) = arch_result {
+                        let arch_str = format!("{}:{}", arch.cputype, arch.cpusubtype);
+                        if arch_str != target_arch {
+                            removable_size += arch.size as u64;
                         }
                     }
                 }
             }
+            _ => {}
         }
-
         Ok(removable_size)
     }
 

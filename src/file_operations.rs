@@ -8,6 +8,8 @@ use walkdir::WalkDir;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json;
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::{Mutex, Semaphore};
 
 pub struct FileOperations;
 
@@ -200,18 +202,6 @@ impl FileOperations {
         let original_size = Self::calculate_directory_size(app_path).await?;
         let mut logs = Vec::new();
 
-        // Launch app if needed
-        if !config.no_launch {
-            if let Err(e) = Self::launch_and_terminate_app(app_path).await {
-                warn!("Failed to launch app: {}", e);
-                logs.push(LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Warning,
-                    message: format!("Failed to launch app: {}", e),
-                });
-            }
-        }
-
         // Process all Mach-O binaries in the app
         let mut processed_files = 0;
         let mut total_files = 0;
@@ -287,61 +277,6 @@ impl FileOperations {
             error_message: None,
             logs,
         })
-    }
-
-    /// Launch and terminate an app to initialize it
-    async fn launch_and_terminate_app(app_path: &Path) -> Result<()> {
-        // Launch the app
-        let status = tokio::process::Command::new("open")
-            .arg(app_path)
-            .status()
-            .await
-            .context("Failed to launch app")?;
-
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to launch app"));
-        }
-
-        // Wait for app to initialize
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-        // Find and terminate the app
-        if let Some(pid) = Self::find_app_pid(app_path).await? {
-            let _ = tokio::process::Command::new("kill")
-                .arg(pid.to_string())
-                .status()
-                .await;
-        }
-
-        Ok(())
-    }
-
-    /// Find the PID of a running app
-    async fn find_app_pid(app_path: &Path) -> Result<Option<u32>> {
-        let output = tokio::process::Command::new("ps")
-            .arg("aux")
-            .output()
-            .await
-            .context("Failed to execute ps command")?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        let app_name = app_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-
-        for line in output_str.lines() {
-            if line.contains(app_name) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() > 1 {
-                    if let Ok(pid) = parts[1].parse::<u32>() {
-                        return Ok(Some(pid));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
     }
 
     /// Sign an entire app with codesign
@@ -458,6 +393,8 @@ impl FileOperations {
         let mut total_saved_space = 0u64;
         let mut successful_apps = 0;
         let mut failed_apps = 0;
+        let total_apps = app_paths.len();
+        let mut processed_count = 0;
 
         // Send batch start message
         let start_msg = LogMessage {
@@ -487,6 +424,13 @@ impl FileOperations {
             }
             
             while let Some(result) = futures.next().await {
+                processed_count += 1;
+                let progress_msg = LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Info,
+                    message: format!("PROGRESS:{}/{}", processed_count, total_apps),
+                };
+                let _ = progress_sender.send(progress_msg).await;
                 match result {
                     Ok(result) => {
                         all_results.push(result.clone());
@@ -519,10 +463,16 @@ impl FileOperations {
                 let progress_msg = LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Info,
+                    message: format!("PROGRESS:{}/{}", index + 1, total_apps),
+                };
+                let _ = progress_sender.send(progress_msg).await;
+                let progress_msg2 = LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Info,
                     message: format!("Processing app {}/{}: {} (in-place)", index + 1, app_paths.len(), app_path.file_name().unwrap_or_default().to_string_lossy()),
                 };
-                let _ = progress_sender.send(progress_msg.clone()).await;
-                all_logs.push(progress_msg);
+                let _ = progress_sender.send(progress_msg2.clone()).await;
+                all_logs.push(progress_msg2);
 
                 match Self::process_single_app_in_batch(app_path, config, progress_sender.clone()).await {
                     Ok(result) => {
@@ -591,7 +541,8 @@ impl FileOperations {
         progress_sender: mpsc::Sender<LogMessage>,
     ) -> Result<ProcessingResult> {
         let mut logs = Vec::new();
-        let mut output_path = None;
+        let output_path = None;
+        let seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
 
         // Calculate initial size
         let initial_size = Self::calculate_directory_size(app_path).await?;
@@ -669,66 +620,85 @@ impl FileOperations {
         scan_depth: usize,
         progress_sender: mpsc::Sender<LogMessage>,
     ) -> Result<()> {
-        use std::collections::HashSet;
         let mut apps = Vec::new();
-        let mut seen_paths = HashSet::new();
-        let mut total_dirs = scan_dirs.len();
-        let mut total_apps = 0;
+        let seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+        let total_dirs = scan_dirs.len();
+        let concurrency_limit = 6; // You can make this configurable
+        let semaphore = Arc::new(Semaphore::new(concurrency_limit));
 
-        for (dir_idx, dir) in scan_dirs.iter().enumerate() {
-            if !dir.exists() {
-                let msg = LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Warning,
-                    message: format!("Directory not found: {}", dir.display()),
-                };
-                let _ = progress_sender.send(msg).await;
-                continue;
+        // Collect all app_dirs first to know total count
+        let mut all_app_dirs = Vec::new();
+        for dir in &scan_dirs {
+            if dir.exists() {
+                let app_dirs: Vec<_> = WalkDir::new(dir)
+                    .max_depth(scan_depth)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_dir() && e.path().extension().map_or(false, |ext| ext == "app"))
+                    .collect();
+                all_app_dirs.extend(app_dirs);
             }
-            let app_dirs: Vec<_> = WalkDir::new(dir)
-                .max_depth(scan_depth)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir() && e.path().extension().map_or(false, |ext| ext == "app"))
-                .collect();
-            total_apps += app_dirs.len();
-            let start_msg = LogMessage {
-                timestamp: chrono::Utc::now(),
-                level: LogLevel::Info,
-                message: format!("Scanning {} app directories in {} ({}/{})", app_dirs.len(), dir.display(), dir_idx+1, total_dirs),
-            };
-            let _ = progress_sender.send(start_msg).await;
-            for (index, entry) in app_dirs.iter().enumerate() {
-                let app_path = entry.path();
-                let app_name = app_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
+        }
+        let total_apps = all_app_dirs.len();
+        let mut scanned_count = 0;
+
+        let start_msg = LogMessage {
+            timestamp: chrono::Utc::now(),
+            level: LogLevel::Info,
+            message: format!("Scanning {} app directories in {} locations", total_apps, total_dirs),
+        };
+        let _ = progress_sender.send(start_msg).await;
+
+        let mut futs = FuturesUnordered::new();
+        for entry in all_app_dirs {
+            let app_path = entry.path().to_path_buf();
+            let app_name = app_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            let progress_sender = progress_sender.clone();
+            let semaphore = semaphore.clone();
+            let seen_paths = seen_paths.clone();
+            futs.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
                 // Avoid duplicates
-                if !seen_paths.insert(app_path.to_path_buf()) {
-                    continue;
+                let mut seen = seen_paths.lock().await;
+                if !seen.insert(app_path.clone()) {
+                    return None;
                 }
+                drop(seen);
                 // Send progress update
                 let progress_msg = LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Info,
-                    message: format!("Scanning {}/{}: {} in {}", index + 1, app_dirs.len(), app_name, dir.display()),
+                    message: format!("Scanning: {}", app_name),
                 };
                 let _ = progress_sender.send(progress_msg).await;
                 // Skip system apps
-                if Self::is_system_app(&app_name) {
-                    continue;
+                if FileOperations::is_system_app(&app_name) {
+                    return None;
                 }
                 // Analyze the app
-                if let Some(app_info) = Self::analyze_app(app_path).await? {
-                    // Apply universal filter if requested
-                    if show_only_universal && app_info.app_type != AppType::Universal {
-                        continue;
-                    }
-                    apps.push(app_info);
+                match FileOperations::analyze_app(&app_path).await {
+                    Ok(Some(app_info)) => Some(app_info),
+                    _ => None,
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }));
+        }
+        while let Some(res) = futs.next().await {
+            scanned_count += 1;
+            let progress_msg = LogMessage {
+                timestamp: chrono::Utc::now(),
+                level: LogLevel::Info,
+                message: format!("PROGRESS:{}/{}", scanned_count, total_apps),
+            };
+            let _ = progress_sender.send(progress_msg).await;
+            if let Ok(Some(app_info)) = res {
+                if show_only_universal && app_info.app_type != AppType::Universal {
+                    continue;
+                }
+                apps.push(app_info);
             }
         }
         let completion_msg = LogMessage {

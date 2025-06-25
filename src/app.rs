@@ -17,7 +17,8 @@ pub struct ArchifyApp {
     pub is_processing: bool,
     pub is_scanning: bool,
     pub show_only_universal: bool,
-    pub scanning_progress: f32,
+    pub progress: f32,
+    pub progress_phase: String,
     pub total_apps_found: usize,
     pub current_scanning_app: String,
     scan_sender: Option<mpsc::Sender<LogMessage>>,
@@ -42,8 +43,7 @@ impl ArchifyApp {
             selected_apps: Vec::new(),
             processing_config: ProcessingConfig {
                 target_architecture: "x86_64".to_string(),
-                no_launch: false,
-                no_sign: false,
+                no_sign: true,
                 no_entitlements: false,
                 use_codesign: false,
                 output_directory: None,
@@ -51,8 +51,7 @@ impl ArchifyApp {
             batch_config: BatchProcessingConfig {
                 processing_config: ProcessingConfig {
                     target_architecture: "x86_64".to_string(),
-                    no_launch: false,
-                    no_sign: false,
+                    no_sign: true,
                     no_entitlements: false,
                     use_codesign: false,
                     output_directory: None,
@@ -65,7 +64,8 @@ impl ArchifyApp {
             is_processing: false,
             is_scanning: false,
             show_only_universal: false,
-            scanning_progress: 0.0,
+            progress: 0.0,
+            progress_phase: String::new(),
             total_apps_found: 0,
             current_scanning_app: String::new(),
             scan_sender: None,
@@ -84,7 +84,8 @@ impl ArchifyApp {
         }
 
         self.is_scanning = true;
-        self.scanning_progress = 0.0;
+        self.progress = 0.0;
+        self.progress_phase = "Scanning applications...".to_string();
         self.total_apps_found = 0;
         self.current_scanning_app.clear();
         self.apps.clear();
@@ -122,12 +123,29 @@ impl ArchifyApp {
     }
 
     pub fn handle_scanning_messages(&mut self) {
-        if !self.is_scanning {
+        if !self.is_scanning && !self.is_processing {
             return;
         }
 
         if let Some(ref mut rx) = self.scan_receiver {
             while let Ok(log) = rx.try_recv() {
+                // Handle progress bar update
+                if log.message.starts_with("PROGRESS:") {
+                    if self.is_scanning {
+                        self.progress_phase = "Scanning applications...".to_string();
+                    } else if self.is_processing {
+                        self.progress_phase = "Processing apps...".to_string();
+                    }
+                    if let Some(progress_str) = log.message.strip_prefix("PROGRESS:") {
+                        let parts: Vec<&str> = progress_str.split('/').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(done), Ok(total)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                                self.progress = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                            }
+                        }
+                    }
+                    continue; // Don't add this to logs
+                }
                 // Check if this is a special apps list message
                 if log.message.starts_with("APPS_LIST:") {
                     if let Some(apps_json) = log.message.strip_prefix("APPS_LIST:") {
@@ -136,11 +154,12 @@ impl ArchifyApp {
                             self.is_scanning = false;
                             self.scan_sender = None;
                             self.scan_receiver = None;
+                            self.progress = 1.0;
+                            self.progress_phase.clear();
                             return;
                         }
                     }
                 }
-                
                 self.logs.push(log);
             }
         }
@@ -188,6 +207,17 @@ impl ArchifyApp {
             message,
         });
     }
+
+    pub fn start_thinning_progress(&mut self) {
+        self.progress = 0.0;
+        self.progress_phase = "Processing apps...".to_string();
+        self.is_processing = true;
+    }
+    pub fn finish_thinning_progress(&mut self) {
+        self.progress = 1.0;
+        self.progress_phase.clear();
+        self.is_processing = false;
+    }
 }
 
 impl eframe::App for ArchifyApp {
@@ -196,8 +226,6 @@ impl eframe::App for ArchifyApp {
         self.handle_scanning_messages();
         
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Archify Rust - ARM64 Binary Remover");
-            
             // Tabs
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.selected_tab, 0, "Applications");
@@ -256,12 +284,12 @@ impl ArchifyApp {
         // Show scanning progress if scanning
         if self.is_scanning {
             ui.label(format!("Scanning applications... {}", self.current_scanning_app));
-            ui.add(egui::ProgressBar::new(self.scanning_progress).show_percentage());
+            ui.add(egui::ProgressBar::new(self.progress).show_percentage());
         }
         
         // Applications list
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for app_info in &self.apps {
+            for app_info in self.apps.iter().filter(|a| !self.show_only_universal || a.app_type == crate::types::AppType::Universal) {
                 let mut selected = self.selected_apps.contains(&app_info.path);
                 if ui.checkbox(&mut selected, &format!("{}", app_info.name)).clicked() {
                     if selected {
@@ -270,10 +298,13 @@ impl ArchifyApp {
                         self.selected_apps.retain(|p| p != &app_info.path);
                     }
                 }
-                
                 ui.label(&format!("Type: {:?}", app_info.app_type));
                 ui.label(&format!("Size: {}", FileOperations::human_readable_size(app_info.total_size, 2)));
-                ui.label(&format!("Savable: {}", FileOperations::human_readable_size(app_info.savable_size, 2)));
+                ui.label(&format!("Estimated Savable: {} (upper bound, may be higher than real savings)", FileOperations::human_readable_size(app_info.savable_size, 2)));
+                // Show actual saved space if available (after processing)
+                if let Some(saved) = crate::types::ProcessingState::default().saved_spaces.get(&app_info.name) {
+                    ui.label(&format!("Actual Saved: {}", FileOperations::human_readable_size(*saved, 2)));
+                }
                 ui.label(&format!("Architectures: {:?}", app_info.architectures));
                 ui.separator();
             }
@@ -286,7 +317,6 @@ impl ArchifyApp {
         ui.label("Target Architecture:");
         ui.text_edit_singleline(&mut self.processing_config.target_architecture);
         
-        ui.checkbox(&mut self.processing_config.no_launch, "Don't launch apps before processing");
         ui.checkbox(&mut self.processing_config.no_sign, "Don't sign binaries");
         ui.checkbox(&mut self.processing_config.no_entitlements, "Don't preserve entitlements");
         ui.checkbox(&mut self.processing_config.use_codesign, "Use codesign instead of ldid");
@@ -304,13 +334,18 @@ impl ArchifyApp {
         ui.separator();
         ui.heading("Batch App Scan Locations");
         ui.label("Default: /Applications");
+        let mut remove_indices = Vec::new();
         for (i, dir) in self.custom_scan_dirs.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(dir.display().to_string());
                 if ui.button("Remove").clicked() {
-                    self.custom_scan_dirs.remove(i);
+                    remove_indices.push(i);
                 }
             });
+        }
+        // Remove after iteration to avoid borrow checker issues
+        for &i in remove_indices.iter().rev() {
+            self.custom_scan_dirs.remove(i);
         }
         if ui.button("Add Directory...").clicked() {
             if let Some(dir) = FileDialog::new().pick_folder() {

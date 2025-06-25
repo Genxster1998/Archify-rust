@@ -36,7 +36,6 @@ pub struct ProcessingConfig {
     pub no_sign: bool,
     pub no_entitlements: bool,
     pub use_codesign: bool,
-    pub no_launch: bool,
     pub output_directory: Option<PathBuf>,
 }
 
@@ -47,7 +46,6 @@ impl Default for ProcessingConfig {
             no_sign: true,
             no_entitlements: true,
             use_codesign: false,
-            no_launch: false,
             output_directory: None,
         }
     }
