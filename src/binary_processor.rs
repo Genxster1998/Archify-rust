@@ -1,4 +1,4 @@
-use crate::types::{BinaryInfo, LogLevel, LogMessage};
+use crate::types::{LogLevel, LogMessage};
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::fs;
@@ -76,57 +76,6 @@ impl BinaryProcessor {
     pub fn is_universal(path: &Path) -> Result<bool> {
         let archs = Self::get_architectures(path)?;
         Ok(archs.len() > 1)
-    }
-
-    /// Get detailed architecture information including sizes
-    pub fn get_detailed_info(path: &Path) -> Result<BinaryInfo> {
-        let archs = Self::get_architectures(path)?;
-        let is_universal = archs.len() > 1;
-
-        // Parse detailed info to get sizes
-        let mut total_size = 0u64;
-        let data = fs::read(path).context("Failed to read binary file")?;
-        match Object::parse(&data) {
-            Ok(Object::Mach(Mach::Fat(fat))) => {
-                for arch_result in fat.iter_arches() {
-                    if let Ok(arch) = arch_result {
-                        total_size += arch.size as u64;
-                    }
-                }
-            }
-            Ok(Object::Mach(Mach::Binary(_mach))) => {
-                // Use file size for single-arch
-                total_size = data.len() as u64;
-            }
-            _ => {}
-        }
-
-        Ok(BinaryInfo {
-            path: path.to_path_buf(),
-            architectures: archs,
-            size: total_size,
-            is_universal,
-        })
-    }
-
-    /// Calculate the size of architectures that can be removed
-    pub fn calculate_removable_size(path: &Path, target_arch: &str) -> Result<u64> {
-        let data = fs::read(path).context("Failed to read binary file")?;
-        let mut removable_size = 0u64;
-        match Object::parse(&data) {
-            Ok(Object::Mach(Mach::Fat(fat))) => {
-                for arch_result in fat.iter_arches() {
-                    if let Ok(arch) = arch_result {
-                        let arch_str = format!("{}:{}", arch.cputype, arch.cpusubtype);
-                        if arch_str != target_arch {
-                            removable_size += arch.size as u64;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(removable_size)
     }
 
     /// Remove unwanted architectures from a binary using lipo

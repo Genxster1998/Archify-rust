@@ -10,6 +10,7 @@ pub struct AppInfo {
     pub savable_size: u64,
     pub architectures: Vec<String>,
     pub app_type: AppType,
+    pub app_source: AppSource,
     pub is_selected: bool,
 }
 
@@ -26,6 +27,25 @@ impl std::fmt::Display for AppType {
             AppType::Universal => write!(f, "Universal"),
             AppType::Native => write!(f, "Native"),
             AppType::Other => write!(f, "Other"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AppSource {
+    AppStore,
+    UserInstalled,
+    System,
+    Unknown,
+}
+
+impl std::fmt::Display for AppSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppSource::AppStore => write!(f, "App Store"),
+            AppSource::UserInstalled => write!(f, "User Installed"),
+            AppSource::System => write!(f, "System"),
+            AppSource::Unknown => write!(f, "Unknown"),
         }
     }
 }

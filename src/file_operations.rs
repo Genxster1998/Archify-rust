@@ -1,5 +1,5 @@
 use crate::binary_processor::BinaryProcessor;
-use crate::types::{AppInfo, AppType, LogLevel, LogMessage, ProcessingConfig, ProcessingResult, BatchProcessingConfig, BatchProcessingResult};
+use crate::types::{AppInfo, AppType, AppSource, LogLevel, LogMessage, ProcessingConfig, ProcessingResult, BatchProcessingConfig, BatchProcessingResult};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -10,35 +10,13 @@ use serde_json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
+use std::os::unix::fs::MetadataExt;
+use libc;
+use num_cpus;
 
 pub struct FileOperations;
 
 impl FileOperations {
-    /// Find all applications in /Applications directory
-    pub async fn find_applications() -> Result<Vec<AppInfo>> {
-        let applications_path = Path::new("/Applications");
-        let mut apps = Vec::new();
-
-        if !applications_path.exists() {
-            return Ok(apps);
-        }
-
-        let entries = WalkDir::new(applications_path)
-            .max_depth(2)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir() && e.path().extension().map_or(false, |ext| ext == "app"));
-
-        for entry in entries {
-            let app_path = entry.path();
-            if let Some(app_info) = Self::analyze_app(app_path).await? {
-                apps.push(app_info);
-            }
-        }
-
-        Ok(apps)
-    }
-
     /// Analyze a single application
     async fn analyze_app(app_path: &Path) -> Result<Option<AppInfo>> {
         let name = app_path
@@ -56,6 +34,7 @@ impl FileOperations {
         let architectures = Self::get_app_architectures(app_path).await?;
         let app_type = Self::determine_app_type(&architectures);
         let savable_size = Self::calculate_savable_size(app_path, &architectures).await?;
+        let app_source = Self::detect_app_source(app_path).await?;
 
         Ok(Some(AppInfo {
             name,
@@ -64,6 +43,7 @@ impl FileOperations {
             savable_size,
             architectures,
             app_type,
+            app_source,
             is_selected: false,
         }))
     }
@@ -152,7 +132,15 @@ impl FileOperations {
     /// Determine the type of app based on architectures
     fn determine_app_type(architectures: &[String]) -> AppType {
         if architectures.len() > 1 {
-            AppType::Universal
+            // Only mark as universal if both x86_64 and arm64 are present
+            let has_x86_64 = architectures.iter().any(|arch| arch == "x86_64");
+            let has_arm64 = architectures.iter().any(|arch| arch == "arm64" || arch == "arm64e");
+            
+            if has_x86_64 && has_arm64 {
+                AppType::Universal
+            } else {
+                AppType::Other
+            }
         } else if architectures.is_empty() {
             AppType::Other
         } else {
@@ -184,13 +172,59 @@ impl FileOperations {
         {
             let file_path = entry.path();
             if BinaryProcessor::is_mach_binary(file_path)? {
-                if let Ok(savable) = BinaryProcessor::calculate_removable_size(file_path, &system_arch) {
+                if let Ok(savable) = Self::calculate_unneeded_arch_size_for_binary(file_path, &system_arch).await {
                     total_savable += savable;
                 }
             }
         }
 
         Ok(total_savable)
+    }
+
+    /// Calculate unneeded architecture size for a single binary using lipo -detailed_info
+    pub async fn calculate_unneeded_arch_size_for_binary(binary_path: &Path, system_arch: &str) -> Result<u64> {
+        let output = tokio::process::Command::new("lipo")
+            .arg("-detailed_info")
+            .arg(binary_path)
+            .output()
+            .await
+            .context("Failed to execute lipo -detailed_info")?;
+
+        if !output.status.success() {
+            return Ok(0);
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let mut architecture_sizes: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut current_arch: Option<String> = None;
+
+        for line in output_str.lines() {
+            let trimmed_line = line.trim();
+            if trimmed_line.starts_with("architecture") {
+                let components: Vec<&str> = trimmed_line.split_whitespace().collect();
+                if components.len() >= 2 {
+                    current_arch = Some(components[1].to_string());
+                }
+            } else if trimmed_line.contains("size") && current_arch.is_some() {
+                let components: Vec<&str> = trimmed_line.split_whitespace().collect();
+                if let Some(size_index) = components.iter().position(|&x| x == "size") {
+                    if size_index + 1 < components.len() {
+                        if let Ok(size) = components[size_index + 1].parse::<u64>() {
+                            architecture_sizes.insert(current_arch.clone().unwrap(), size);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calculate total size of unneeded architectures
+        let unneeded_sizes: u64 = architecture_sizes
+            .iter()
+            .filter(|(arch, _)| *arch != system_arch)
+            .map(|(_, size)| size)
+            .sum();
+
+        Ok(unneeded_sizes)
     }
 
     /// Process a single application (remove unwanted architectures)
@@ -335,35 +369,6 @@ impl FileOperations {
         } else {
             Err(anyhow::anyhow!("Failed to extract entitlements"))
         }
-    }
-
-    /// Duplicate an app to a new location
-    pub async fn duplicate_app(app_path: &Path, output_dir: &Path) -> Result<PathBuf> {
-        let app_name = app_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Unknown.app");
-        
-        let output_app_path = output_dir.join(app_name);
-        
-        // Create output directory if it doesn't exist
-        tokio::fs::create_dir_all(output_dir).await
-            .context("Failed to create output directory")?;
-
-        // Use rsync to copy the app
-        let status = tokio::process::Command::new("rsync")
-            .args(&["-r", "-v", "-aHz", "--delete"])
-            .arg(format!("{}/", app_path.display()))
-            .arg(format!("{}/", output_app_path.display()))
-            .status()
-            .await
-            .context("Failed to execute rsync")?;
-
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to duplicate app"));
-        }
-
-        Ok(output_app_path)
     }
 
     /// Format bytes into human-readable format
@@ -542,7 +547,7 @@ impl FileOperations {
     ) -> Result<ProcessingResult> {
         let mut logs = Vec::new();
         let output_path = None;
-        let seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+        let _seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
 
         // Calculate initial size
         let initial_size = Self::calculate_directory_size(app_path).await?;
@@ -617,13 +622,14 @@ impl FileOperations {
     pub async fn scan_applications_async_multi(
         scan_dirs: Vec<PathBuf>,
         show_only_universal: bool,
+        show_only_appstore: bool,
         scan_depth: usize,
         progress_sender: mpsc::Sender<LogMessage>,
     ) -> Result<()> {
         let mut apps = Vec::new();
-        let seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+        let _seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
         let total_dirs = scan_dirs.len();
-        let concurrency_limit = 6; // You can make this configurable
+        let concurrency_limit = num_cpus::get(); // Use all available CPU threads
         let semaphore = Arc::new(Semaphore::new(concurrency_limit));
 
         // Collect all app_dirs first to know total count
@@ -645,7 +651,7 @@ impl FileOperations {
         let start_msg = LogMessage {
             timestamp: chrono::Utc::now(),
             level: LogLevel::Info,
-            message: format!("Scanning {} app directories in {} locations", total_apps, total_dirs),
+            message: format!("Scanning {} app directories in {} locations using {} threads", total_apps, total_dirs, concurrency_limit),
         };
         let _ = progress_sender.send(start_msg).await;
 
@@ -659,7 +665,7 @@ impl FileOperations {
                 .to_string();
             let progress_sender = progress_sender.clone();
             let semaphore = semaphore.clone();
-            let seen_paths = seen_paths.clone();
+            let seen_paths = _seen_paths.clone();
             futs.push(tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 // Avoid duplicates
@@ -695,10 +701,13 @@ impl FileOperations {
             };
             let _ = progress_sender.send(progress_msg).await;
             if let Ok(Some(app_info)) = res {
-                if show_only_universal && app_info.app_type != AppType::Universal {
-                    continue;
+                // Apply filters
+                let universal_filter = !show_only_universal || app_info.app_type == AppType::Universal;
+                let appstore_filter = !show_only_appstore || app_info.app_source == AppSource::AppStore;
+                
+                if universal_filter && appstore_filter {
+                    apps.push(app_info);
                 }
-                apps.push(app_info);
             }
         }
         let completion_msg = LogMessage {
@@ -715,6 +724,50 @@ impl FileOperations {
         };
         let _ = progress_sender.send(apps_msg).await;
         Ok(())
+    }
+
+    /// Detect the source of an app by checking ownership
+    pub async fn detect_app_source(app_path: &Path) -> Result<AppSource> {
+        // Get the metadata of the .app folder
+        let metadata = tokio::fs::metadata(app_path).await
+            .context("Failed to get app metadata")?;
+        
+        let uid = metadata.uid();
+        
+        // On macOS:
+        // - UID 0 (root) typically means system apps
+        // - UID 501 (first user) typically means user-installed apps
+        // - UID 502+ typically means other users or App Store apps
+        
+        // Check if it's in /Applications (system-wide) or ~/Applications (user-specific)
+        let is_system_applications = app_path.starts_with("/Applications");
+        let is_user_applications = app_path.starts_with(&format!("{}/Applications", std::env::var("HOME").unwrap_or_default()));
+        
+        // Additional check for App Store apps: they often have specific ownership patterns
+        // and are typically in /Applications with non-root ownership
+        if is_system_applications && uid != 0 {
+            // Check if it has App Store receipt
+            let receipt_path = app_path.join("Contents/_MASReceipt");
+            if receipt_path.exists() {
+                return Ok(AppSource::AppStore);
+            }
+            
+            // Check if it's owned by the current user (likely user-installed)
+            let current_uid = unsafe { libc::getuid() };
+            if uid == current_uid {
+                return Ok(AppSource::UserInstalled);
+            }
+            
+            // If it's in /Applications but not owned by root and not by current user,
+            // it's likely an App Store app
+            return Ok(AppSource::AppStore);
+        } else if is_user_applications {
+            return Ok(AppSource::UserInstalled);
+        } else if uid == 0 {
+            return Ok(AppSource::System);
+        }
+        
+        Ok(AppSource::Unknown)
     }
 }
 

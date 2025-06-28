@@ -57,6 +57,12 @@ rfd = "0.14"
 # Fast Mach-O parsing
 goblin = "0.8"
 
+# System calls
+libc = "0.2"
+
+# CPU core detection
+num_cpus = "1.16"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS specific dependencies
 cocoa = "0.25"

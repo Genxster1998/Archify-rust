@@ -1,0 +1,9 @@
+[2025-06-28 04:41:24] INFO: Starting batch processing of 2 applications (in-place)
+[2025-06-28 04:41:24] INFO: Processing app 1/2: Lapce.app (in-place)
+[2025-06-28 04:41:24] INFO: Processing Lapce.app (Initial size: 92.56 MB)
+[2025-06-28 04:41:24] INFO: Processing binary: /Applications/Lapce.app/Contents/MacOS/lapce
+[2025-06-28 04:41:24] SUCCESS: Successfully thinned binary /Applications/Lapce.app/Contents/MacOS/lapce to x86_64 architecture
+[2025-06-28 04:41:24] SUCCESS: Completed Lapce.app (Final size: 48.43 MB, Saved: 44.13 MB, 47.7%)
+[2025-06-28 04:41:24] INFO: Processing app 2/2: Tailscale.app (in-place)
+[2025-06-28 04:41:24] ERROR: Failed to process /Applications/Tailscale.app: Failed to replace original file with thinned version
+[2025-06-28 04:41:24] SUCCESS: Batch processing completed. Success: 1, Failed: 1, Total saved: 44.13 MB

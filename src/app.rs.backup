@@ -24,6 +24,10 @@ pub struct ArchifyApp {
     pub current_scanning_app: String,
     scan_sender: Option<mpsc::Sender<LogMessage>>,
     scan_receiver: Option<mpsc::Receiver<LogMessage>>,
+    // For single app mode
+    pub single_app_path: Option<PathBuf>,
+    pub single_app_output_dir: Option<PathBuf>,
+    // For manual thinning
     pub manual_selected_apps: Vec<PathBuf>,
     pub custom_scan_dirs: Vec<PathBuf>,
     pub scan_depth: usize,
@@ -68,6 +72,8 @@ impl ArchifyApp {
             current_scanning_app: String::new(),
             scan_sender: None,
             scan_receiver: None,
+            single_app_path: None,
+            single_app_output_dir: None,
             manual_selected_apps: Vec::new(),
             custom_scan_dirs: Vec::new(),
             scan_depth: 2,
@@ -108,6 +114,15 @@ impl ArchifyApp {
                 }).await;
             }
         });
+    }
+
+    pub fn update_scanning_progress(&mut self) {
+        if !self.is_scanning {
+            return;
+        }
+
+        // This will be called from the UI update loop to check for new messages
+        // The actual message handling is done in the scan_applications function
     }
 
     pub fn handle_scanning_messages(&mut self) {
@@ -188,6 +203,25 @@ impl ArchifyApp {
         self.add_log(LogLevel::Info, "Processing completed".to_string());
     }
 
+    fn add_log(&mut self, level: LogLevel, message: String) {
+        self.logs.push(LogMessage {
+            timestamp: chrono::Utc::now(),
+            level,
+            message,
+        });
+    }
+
+    pub fn start_thinning_progress(&mut self) {
+        self.progress = 0.0;
+        self.progress_phase = "Processing apps...".to_string();
+        self.is_processing = true;
+    }
+    pub fn finish_thinning_progress(&mut self) {
+        self.progress = 1.0;
+        self.progress_phase.clear();
+        self.is_processing = false;
+    }
+
     fn process_manual_selected_apps(&mut self) {
         if self.manual_selected_apps.is_empty() {
             self.add_log(LogLevel::Warning, "No applications selected for processing".to_string());
@@ -223,14 +257,65 @@ impl ArchifyApp {
         self.add_log(LogLevel::Info, "Manual thinning completed".to_string());
     }
 
-    fn add_log(&mut self, level: LogLevel, message: String) {
-        self.logs.push(LogMessage {
-            timestamp: chrono::Utc::now(),
-            level,
-            message,
-        });
+    fn render_manual_thinning_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Manual Thinning");
+        ui.label("Select one or more .app bundles from any location to thin in-place.");
+        if ui.button("Select .app Bundles...").clicked() {
+            if let Some(paths) = FileDialog::new()
+                .set_directory(std::env::current_dir().unwrap_or_default())
+                .pick_files() {
+                // Only keep .app directories
+                self.manual_selected_apps = paths
+                    .into_iter()
+                    .filter(|p| p.extension().map_or(false, |ext| ext == "app"))
+                    .collect();
+            }
+        }
+        if !self.manual_selected_apps.is_empty() {
+            ui.label("Selected apps:");
+            for path in &self.manual_selected_apps {
+                ui.label(format!("- {}", path.display()));
+            }
+            if ui.button("Process Selected Apps").clicked() && !self.is_processing {
+                self.process_manual_selected_apps();
+            }
+        }
     }
+}
 
+impl eframe::App for ArchifyApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle scanning messages
+        self.handle_scanning_messages();
+        
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Tabs
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.selected_tab, 0, "Applications");
+                ui.selectable_value(&mut self.selected_tab, 1, "Settings");
+                ui.selectable_value(&mut self.selected_tab, 2, "Logs");
+                ui.selectable_value(&mut self.selected_tab, 3, "Manual Thinning");
+            });
+            
+            ui.separator();
+            
+            match self.selected_tab {
+                0 => self.render_applications_tab(ui),
+                1 => self.render_settings_tab(ui),
+                2 => self.render_logs_tab(ui),
+                3 => self.render_manual_thinning_tab(ui),
+                _ => unreachable!(),
+            }
+        });
+        
+        // Request continuous updates while scanning
+        if self.is_scanning {
+            ctx.request_repaint();
+        }
+    }
+}
+
+impl ArchifyApp {
     fn render_applications_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Scan Applications").clicked() && !self.is_scanning {
@@ -265,34 +350,6 @@ impl ArchifyApp {
         });
         
         ui.separator();
-        
-        // Select All checkbox
-        let filtered_apps: Vec<_> = self.apps.iter().filter(|a| {
-            let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
-            let appstore_filter = !self.show_only_appstore || a.app_source == crate::types::AppSource::AppStore;
-            universal_filter && appstore_filter
-        }).collect();
-        
-        if !filtered_apps.is_empty() {
-            let all_selected = filtered_apps.iter().all(|a| self.selected_apps.contains(&a.path));
-            let mut select_all = all_selected;
-            
-            if ui.checkbox(&mut select_all, "Select All").clicked() {
-                if select_all {
-                    // Select all filtered apps
-                    for app_info in filtered_apps {
-                        if !self.selected_apps.contains(&app_info.path) {
-                            self.selected_apps.push(app_info.path.clone());
-                        }
-                    }
-                } else {
-                    // Deselect all filtered apps
-                    self.selected_apps.retain(|p| {
-                        !filtered_apps.iter().any(|a| &a.path == p)
-                    });
-                }
-            }
-        }
         
         // Show scanning progress if scanning
         if self.is_scanning {
@@ -399,6 +456,35 @@ impl ArchifyApp {
         });
     }
 
+    fn render_single_app_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Single App Processing");
+        ui.label("Select an app bundle (.app) to process in-place, or specify an output directory for a copy.");
+        
+        // File picker for app
+        if ui.button("Select App...").clicked() {
+            // You would use a file dialog here in a real app
+            // For now, just a placeholder
+            // self.single_app_path = Some(PathBuf::from("/Applications/SomeApp.app"));
+        }
+        if let Some(ref path) = self.single_app_path {
+            ui.label(format!("Selected app: {}", path.display()));
+        }
+        
+        // Output directory picker
+        if ui.button("Set Output Directory...").clicked() {
+            // You would use a directory dialog here in a real app
+            // For now, just a placeholder
+            // self.single_app_output_dir = Some(PathBuf::from("/Users/youruser/Desktop"));
+        }
+        if let Some(ref dir) = self.single_app_output_dir {
+            ui.label(format!("Output directory: {}", dir.display()));
+        }
+        
+        if ui.button("Process App").clicked() {
+            // TODO: Implement single app processing logic
+        }
+    }
+
     fn render_manual_thinning_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Manual Thinning");
         ui.label("Select one or more .app bundles from any location to thin in-place.");
@@ -421,38 +507,6 @@ impl ArchifyApp {
             if ui.button("Process Selected Apps").clicked() && !self.is_processing {
                 self.process_manual_selected_apps();
             }
-        }
-    }
-}
-
-impl eframe::App for ArchifyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle scanning messages
-        self.handle_scanning_messages();
-        
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Tabs
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.selected_tab, 0, "Applications");
-                ui.selectable_value(&mut self.selected_tab, 1, "Settings");
-                ui.selectable_value(&mut self.selected_tab, 2, "Logs");
-                ui.selectable_value(&mut self.selected_tab, 3, "Manual Thinning");
-            });
-            
-            ui.separator();
-            
-            match self.selected_tab {
-                0 => self.render_applications_tab(ui),
-                1 => self.render_settings_tab(ui),
-                2 => self.render_logs_tab(ui),
-                3 => self.render_manual_thinning_tab(ui),
-                _ => unreachable!(),
-            }
-        });
-        
-        // Request continuous updates while scanning
-        if self.is_scanning {
-            ctx.request_repaint();
         }
     }
 } 
