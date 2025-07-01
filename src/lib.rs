@@ -1,7 +1,10 @@
 pub mod app;
-pub mod binary_processor;
-pub mod file_operations;
 pub mod types;
+pub mod file_operations;
+pub mod binary_processor;
+pub mod gui;
+pub mod privileged_helper;
+pub mod helper;
 
 #[cfg(test)]
 mod tests {

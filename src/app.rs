@@ -1,14 +1,18 @@
 use crate::file_operations::FileOperations;
-use crate::types::{AppInfo, LogLevel, LogMessage, ProcessingConfig, BatchProcessingConfig};
+use crate::types::{AppInfo, LogLevel, LogMessage, ProcessingConfig, BatchProcessingConfig, AppSource};
 use eframe::egui;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::runtime::Runtime;
 use rfd::FileDialog;
+use crate::privileged_helper::PrivilegedHelper;
+use std::sync::OnceLock;
+
+// Global runtime for the GUI app
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 pub struct ArchifyApp {
     selected_tab: usize,
-    runtime: Runtime,
     pub apps: Vec<AppInfo>,
     pub selected_apps: Vec<PathBuf>,
     pub processing_config: ProcessingConfig,
@@ -27,15 +31,22 @@ pub struct ArchifyApp {
     pub manual_selected_apps: Vec<PathBuf>,
     pub custom_scan_dirs: Vec<PathBuf>,
     pub scan_depth: usize,
+    // Elevated permission dialog state
+    pub show_elevated_dialog: bool,
+    pub elevated_apps: Vec<PathBuf>,
+    pub user_apps: Vec<PathBuf>,
+    pub elevated_confirmed: bool,
 }
 
 impl ArchifyApp {
     pub fn new() -> Self {
-        let runtime = Runtime::new().expect("Failed to create Tokio runtime");
+        // Initialize the global runtime if not already done
+        let _runtime = RUNTIME.get_or_init(|| {
+            Runtime::new().expect("Failed to create Tokio runtime")
+        });
         
         Self {
             selected_tab: 0,
-            runtime,
             apps: Vec::new(),
             selected_apps: Vec::new(),
             processing_config: ProcessingConfig {
@@ -71,6 +82,11 @@ impl ArchifyApp {
             manual_selected_apps: Vec::new(),
             custom_scan_dirs: Vec::new(),
             scan_depth: 2,
+            // Elevated permission dialog state
+            show_elevated_dialog: false,
+            elevated_apps: Vec::new(),
+            user_apps: Vec::new(),
+            elevated_confirmed: false,
         }
     }
 
@@ -91,7 +107,7 @@ impl ArchifyApp {
         self.scan_sender = Some(tx.clone());
         self.scan_receiver = Some(rx);
         
-        let runtime = &self.runtime;
+        let runtime = RUNTIME.get().expect("Runtime not initialized");
         let show_only_universal = self.show_only_universal;
         let show_only_appstore = self.show_only_appstore;
         let mut scan_dirs = vec![PathBuf::from("/Applications")];
@@ -159,6 +175,42 @@ impl ArchifyApp {
             return;
         }
 
+        // Categorize apps by permission requirements
+        self.categorize_apps_by_permissions();
+        
+        // If there are elevated apps, show the dialog
+        if !self.elevated_apps.is_empty() {
+            self.show_elevated_dialog = true;
+            return;
+        }
+        
+        // Process user apps normally
+        self.process_apps_with_permissions(self.user_apps.clone(), false);
+    }
+
+    fn categorize_apps_by_permissions(&mut self) {
+        self.elevated_apps.clear();
+        self.user_apps.clear();
+        
+        for app_path in &self.selected_apps {
+            if let Some(app_info) = self.apps.iter().find(|a| &a.path == app_path) {
+                match app_info.app_source {
+                    AppSource::AppStore | AppSource::System => {
+                        self.elevated_apps.push(app_path.clone());
+                    }
+                    AppSource::UserInstalled | AppSource::Unknown => {
+                        self.user_apps.push(app_path.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn process_apps_with_permissions(&mut self, apps: Vec<PathBuf>, elevated: bool) {
+        if apps.is_empty() {
+            return;
+        }
+
         self.is_processing = true;
         self.logs.clear();
 
@@ -167,10 +219,11 @@ impl ArchifyApp {
 
         let (tx, mut rx) = mpsc::channel(100);
         let config = self.batch_config.clone();
-        let selected_apps = self.selected_apps.clone();
+        let elevated_apps = if elevated { apps.clone() } else { Vec::new() };
 
-        self.runtime.spawn(async move {
-            if let Err(e) = FileOperations::batch_process_apps(selected_apps, &config, tx.clone()).await {
+        let runtime = RUNTIME.get().expect("Runtime not initialized");
+        runtime.spawn(async move {
+            if let Err(e) = FileOperations::batch_process_apps_with_permissions(apps, &config, tx.clone(), elevated_apps).await {
                 let _ = tx.send(LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Error,
@@ -185,7 +238,67 @@ impl ArchifyApp {
         }
 
         self.is_processing = false;
-        self.add_log(LogLevel::Info, "Processing completed".to_string());
+        let permission_type = if elevated { "elevated" } else { "user" };
+        self.add_log(LogLevel::Info, format!("{} processing completed", permission_type));
+    }
+
+    pub fn confirm_elevated_processing(&mut self) {
+        self.show_elevated_dialog = false;
+        self.elevated_confirmed = true;
+
+        // If there are elevated apps, use privileged helper
+        if !self.elevated_apps.is_empty() {
+            // Check if helper is installed
+            if !PrivilegedHelper::is_installed() {
+                // Install helper if not present
+                let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
+                rt.spawn(async move {
+                    if let Err(e) = PrivilegedHelper::install_helper().await {
+                        eprintln!("Failed to install privileged helper: {}", e);
+                    }
+                });
+                self.add_log(LogLevel::Warning, "Installing privileged helper...".to_string());
+            } else {
+                // Process elevated apps using helper
+                for app_path in &self.elevated_apps {
+                    let app_path = app_path.clone();
+                    let config = self.processing_config.clone();
+                    let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
+                    
+                    rt.spawn(async move {
+                        match PrivilegedHelper::thin_app(
+                            &app_path,
+                            &config.target_architecture,
+                            config.no_sign,
+                            config.no_entitlements,
+                            config.use_codesign,
+                        ).await {
+                            Ok(result) => {
+                                println!("Successfully thinned {}: {}", app_path.display(), result);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to thin {}: {}", app_path.display(), e);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        // Process user apps normally
+        self.process_apps_with_permissions(self.user_apps.clone(), false);
+
+        // Clear the categorized lists
+        self.elevated_apps.clear();
+        self.user_apps.clear();
+        self.elevated_confirmed = false;
+    }
+
+    pub fn cancel_elevated_processing(&mut self) {
+        self.show_elevated_dialog = false;
+        self.elevated_apps.clear();
+        self.user_apps.clear();
+        self.elevated_confirmed = false;
     }
 
     fn process_manual_selected_apps(&mut self) {
@@ -204,7 +317,8 @@ impl ArchifyApp {
         let config = self.batch_config.clone();
         let selected_apps = self.manual_selected_apps.clone();
 
-        self.runtime.spawn(async move {
+        let runtime = RUNTIME.get().expect("Runtime not initialized");
+        runtime.spawn(async move {
             if let Err(e) = FileOperations::batch_process_apps(selected_apps, &config, tx.clone()).await {
                 let _ = tx.send(LogMessage {
                     timestamp: chrono::Utc::now(),
@@ -269,7 +383,7 @@ impl ArchifyApp {
         // Select All checkbox
         let filtered_apps: Vec<_> = self.apps.iter().filter(|a| {
             let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
-            let appstore_filter = !self.show_only_appstore || a.app_source == crate::types::AppSource::AppStore;
+            let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
             universal_filter && appstore_filter
         }).collect();
         
@@ -304,7 +418,7 @@ impl ArchifyApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for app_info in self.apps.iter().filter(|a| {
                 let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
-                let appstore_filter = !self.show_only_appstore || a.app_source == crate::types::AppSource::AppStore;
+                let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
                 universal_filter && appstore_filter
             }) {
                 let mut selected = self.selected_apps.contains(&app_info.path);
@@ -338,6 +452,13 @@ impl ArchifyApp {
         ui.checkbox(&mut self.processing_config.no_sign, "Don't sign binaries");
         ui.checkbox(&mut self.processing_config.no_entitlements, "Don't preserve entitlements");
         ui.checkbox(&mut self.processing_config.use_codesign, "Use codesign instead of ldid");
+        
+        ui.separator();
+        ui.heading("App Store Apps");
+        
+        ui.label("Note: App Store apps have additional protections that may prevent modification.");
+        ui.label("Admin privileges may be required to modify some App Store apps.");
+        ui.label("The app will attempt to process App Store apps, but some may fail due to system protections.");
         
         ui.separator();
         ui.heading("Batch Processing Options");
@@ -423,6 +544,65 @@ impl ArchifyApp {
             }
         }
     }
+
+    fn render_elevated_dialog(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Elevated Permissions Required")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading("⚠️ Elevated Permissions Required");
+                
+                ui.label("The following apps require elevated permissions to modify:");
+                ui.separator();
+                
+                // Show elevated apps
+                for app_path in &self.elevated_apps {
+                    if let Some(app_info) = self.apps.iter().find(|a| &a.path == app_path) {
+                        ui.label(format!("• {} ({})", app_info.name, app_info.app_source));
+                    }
+                }
+                
+                ui.separator();
+                
+                // Show user apps that will be processed normally
+                if !self.user_apps.is_empty() {
+                    ui.label("The following apps will be processed normally (user permissions):");
+                    for app_path in &self.user_apps {
+                        if let Some(app_info) = self.apps.iter().find(|a| &a.path == app_path) {
+                            ui.label(format!("• {} ({})", app_info.name, app_info.app_source));
+                        }
+                    }
+                    ui.separator();
+                }
+                
+                // Warning about elevated processing
+                ui.colored_label(egui::Color32::YELLOW, "⚠️ Important Warnings:");
+                ui.label("• Elevated processing may modify system files and App Store apps");
+                ui.label("• Some apps may become unusable if modified incorrectly");
+                ui.label("• Always backup important data before proceeding");
+                ui.label("• User-owned apps should NOT be processed with elevated permissions");
+                ui.label("  as this may break their UID/GID permissions");
+                
+                ui.separator();
+                
+                // Action buttons
+                ui.horizontal(|ui| {
+                    if ui.button("🔄 Process with Elevated Permissions").clicked() {
+                        self.confirm_elevated_processing();
+                    }
+                    
+                    if ui.button("❌ Cancel").clicked() {
+                        self.cancel_elevated_processing();
+                    }
+                });
+                
+                ui.separator();
+                
+                // Additional info
+                ui.label("Note: The app will use sudo/administrator privileges for elevated apps");
+                ui.label("and normal user permissions for user-owned apps.");
+            });
+    }
 }
 
 impl eframe::App for ArchifyApp {
@@ -450,9 +630,32 @@ impl eframe::App for ArchifyApp {
             }
         });
         
+        // Show elevated permission dialog if needed
+        if self.show_elevated_dialog {
+            self.render_elevated_dialog(ctx);
+        }
+        
         // Request continuous updates while scanning
         if self.is_scanning {
             ctx.request_repaint();
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Clean up any ongoing operations
+        self.is_scanning = false;
+        self.is_processing = false;
+        self.scan_sender = None;
+        self.scan_receiver = None;
+    }
+}
+
+impl Drop for ArchifyApp {
+    fn drop(&mut self) {
+        // Ensure any ongoing operations are stopped
+        self.is_scanning = false;
+        self.is_processing = false;
+        self.scan_sender = None;
+        self.scan_receiver = None;
     }
 } 

@@ -5,12 +5,65 @@ mod app;
 mod binary_processor;
 mod file_operations;
 mod types;
+mod privileged_helper;
 
 use app::ArchifyApp;
+use std::env;
+use std::path::PathBuf;
+use types::{BatchProcessingConfig, LogLevel};
+use file_operations::FileOperations;
 
 fn main() -> Result<(), eframe::Error> {
     // Initialize logging
     tracing_subscriber::fmt::init();
+
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 && args[1] == "--batch-elevated" {
+        // CLI mode: process apps as root
+        let app_paths: Vec<PathBuf> = args[2..].iter().map(|s| PathBuf::from(s)).collect();
+        
+        // Validate that all paths exist and are .app bundles
+        let valid_paths: Vec<PathBuf> = app_paths.into_iter()
+            .filter(|p| p.exists() && p.extension().map_or(false, |ext| ext == "app"))
+            .collect();
+            
+        if valid_paths.is_empty() {
+            eprintln!("[ERROR] No valid .app bundles found in arguments");
+            return Ok(());
+        }
+        
+        let config = BatchProcessingConfig::default();
+        
+        // Create a runtime for CLI mode
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+            println!("[archify-rust] Running batch processing as root for: {:?}", valid_paths);
+            
+            // Spawn the batch processing in a separate task
+            let processing_handle = tokio::spawn(async move {
+                FileOperations::batch_process_apps(valid_paths, &config, tx).await
+            });
+            
+            // Print logs to stdout
+            while let Some(log) = rx.recv().await {
+                let color = match log.level {
+                    LogLevel::Info => "[INFO]",
+                    LogLevel::Warning => "[WARN]",
+                    LogLevel::Error => "[ERROR]",
+                    LogLevel::Success => "[SUCCESS]",
+                };
+                println!("{} {}", color, log.message);
+            }
+            
+            // Wait for processing to complete
+            if let Err(e) = processing_handle.await {
+                eprintln!("[ERROR] Processing failed: {}", e);
+            }
+        });
+        
+        return Ok(());
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

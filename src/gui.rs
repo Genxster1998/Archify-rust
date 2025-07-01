@@ -1,7 +1,6 @@
 use crate::app::ArchifyApp;
-use crate::types::{AppInfo, LogLevel};
+use crate::types::LogLevel;
 use eframe::egui;
-use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct GuiState {
@@ -75,7 +74,6 @@ impl GuiState {
         ui.label("Target Architecture:");
         ui.text_edit_singleline(&mut app.processing_config.target_architecture);
         
-        ui.checkbox(&mut app.processing_config.no_launch, "Don't launch apps before processing");
         ui.checkbox(&mut app.processing_config.no_sign, "Don't sign binaries");
         ui.checkbox(&mut app.processing_config.no_entitlements, "Don't preserve entitlements");
         ui.checkbox(&mut app.processing_config.use_codesign, "Use codesign instead of ldid");

@@ -1,5 +1,5 @@
 use crate::binary_processor::BinaryProcessor;
-use crate::types::{AppInfo, AppType, AppSource, LogLevel, LogMessage, ProcessingConfig, ProcessingResult, BatchProcessingConfig, BatchProcessingResult};
+use crate::types::{AppInfo, AppType, AppSource, LogLevel, LogMessage, ProcessingResult, BatchProcessingConfig, BatchProcessingResult};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -11,7 +11,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use std::os::unix::fs::MetadataExt;
-use libc;
 use num_cpus;
 
 pub struct FileOperations;
@@ -227,92 +226,6 @@ impl FileOperations {
         Ok(unneeded_sizes)
     }
 
-    /// Process a single application (remove unwanted architectures)
-    pub async fn process_app(
-        app_path: &Path,
-        config: &ProcessingConfig,
-        progress_sender: mpsc::Sender<LogMessage>,
-    ) -> Result<ProcessingResult> {
-        let original_size = Self::calculate_directory_size(app_path).await?;
-        let mut logs = Vec::new();
-
-        // Process all Mach-O binaries in the app
-        let mut processed_files = 0;
-        let mut total_files = 0;
-
-        // Count total files first
-        for entry in WalkDir::new(app_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            if BinaryProcessor::is_mach_binary(entry.path())? {
-                total_files += 1;
-            }
-        }
-
-        // Process files
-        for entry in WalkDir::new(app_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let file_path = entry.path();
-            
-            if BinaryProcessor::is_mach_binary(file_path)? {
-                // Remove unwanted architectures
-                let mut file_logs = BinaryProcessor::remove_architectures(file_path, &config.target_architecture).await?;
-                logs.append(&mut file_logs);
-
-                // Sign if needed
-                if !config.no_sign {
-                    let mut sign_logs = BinaryProcessor::sign_with_ldid(file_path, config.no_entitlements).await?;
-                    logs.append(&mut sign_logs);
-                }
-
-                processed_files += 1;
-                
-                // Send progress update
-                let progress_msg = LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Info,
-                    message: format!(
-                        "Processed {}/{} files in {}",
-                        processed_files,
-                        total_files,
-                        app_path.file_name().unwrap_or_default().to_string_lossy()
-                    ),
-                };
-                let _ = progress_sender.send(progress_msg.clone()).await;
-            }
-        }
-
-        // Sign entire app with codesign if requested
-        if config.use_codesign {
-            let mut codesign_logs = Self::codesign_app(app_path, config.no_entitlements).await?;
-            logs.append(&mut codesign_logs);
-        }
-
-        let final_size = Self::calculate_directory_size(app_path).await?;
-        let saved_space = original_size.saturating_sub(final_size);
-
-        // Send all logs
-        for log in &logs {
-            let _ = progress_sender.send(log.clone()).await;
-        }
-
-        Ok(ProcessingResult {
-            app_path: app_path.to_path_buf(),
-            output_path: None,
-            original_size,
-            final_size,
-            saved_space,
-            success: true,
-            error_message: None,
-            logs,
-        })
-    }
-
     /// Sign an entire app with codesign
     async fn codesign_app(app_path: &Path, no_entitlements: bool) -> Result<Vec<LogMessage>> {
         let mut logs = Vec::new();
@@ -385,30 +298,50 @@ impl FileOperations {
         format!("{:.1$} {2}", size_f64, decimal_places, units[unit_index])
     }
 
-    /// Batch process multiple applications
-    pub async fn batch_process_apps(
+    /// Check if the current process has elevated permissions (root/admin)
+    pub fn has_elevated_permissions() -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(metadata) = std::fs::metadata("/Applications") {
+                // Check if we can write to /Applications (requires elevated permissions)
+                metadata.uid() == 0 || std::env::var("SUDO_UID").is_ok()
+            } else {
+                false
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    /// Batch process multiple applications with permission handling
+    pub async fn batch_process_apps_with_permissions(
         app_paths: Vec<PathBuf>,
         config: &BatchProcessingConfig,
         progress_sender: mpsc::Sender<LogMessage>,
+        elevated_apps: Vec<PathBuf>,
     ) -> Result<BatchProcessingResult> {
-        let mut all_results = Vec::new();
-        let mut all_logs = Vec::new();
+        let mut results = Vec::new();
         let mut total_original_size = 0u64;
         let mut total_final_size = 0u64;
         let mut total_saved_space = 0u64;
         let mut successful_apps = 0;
         let mut failed_apps = 0;
-        let total_apps = app_paths.len();
-        let mut processed_count = 0;
+        let mut all_logs = Vec::new();
 
-        // Send batch start message
-        let start_msg = LogMessage {
-            timestamp: chrono::Utc::now(),
-            level: LogLevel::Info,
-            message: format!("Starting batch processing of {} applications (in-place)", app_paths.len()),
-        };
-        let _ = progress_sender.send(start_msg.clone()).await;
-        all_logs.push(start_msg);
+        // Check if we have elevated permissions for elevated apps
+        let has_elevated = Self::has_elevated_permissions();
+        if !elevated_apps.is_empty() && !has_elevated {
+            let msg = "Elevated permissions required for App Store and system apps. Please run with sudo.";
+            let _ = progress_sender.send(LogMessage {
+                timestamp: chrono::Utc::now(),
+                level: LogLevel::Error,
+                message: msg.to_string(),
+            }).await;
+            return Err(anyhow::anyhow!(msg));
+        }
 
         if config.parallel_processing {
             // Parallel processing
@@ -419,107 +352,76 @@ impl FileOperations {
                 let semaphore = semaphore.clone();
                 let config = config.clone();
                 let progress_sender = progress_sender.clone();
+                let _is_elevated = elevated_apps.contains(&app_path);
                 
                 let future = async move {
                     let _permit = semaphore.acquire().await.unwrap();
-                    Self::process_single_app_in_batch(&app_path, &config, progress_sender).await
+                    Self::process_single_app_in_batch_with_permissions(&app_path, &config, progress_sender, _is_elevated).await
                 };
                 
                 futures.push(future);
             }
             
             while let Some(result) = futures.next().await {
-                processed_count += 1;
-                let progress_msg = LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Info,
-                    message: format!("PROGRESS:{}/{}", processed_count, total_apps),
-                };
-                let _ = progress_sender.send(progress_msg).await;
                 match result {
-                    Ok(result) => {
-                        all_results.push(result.clone());
-                        all_logs.extend(result.logs.clone());
+                    Ok(processing_result) => {
+                        total_original_size += processing_result.original_size;
+                        total_final_size += processing_result.final_size;
+                        total_saved_space += processing_result.saved_space;
+                        all_logs.extend(processing_result.logs.clone());
                         
-                        if result.success {
+                        if processing_result.success {
                             successful_apps += 1;
-                            total_original_size += result.original_size;
-                            total_final_size += result.final_size;
-                            total_saved_space += result.saved_space;
                         } else {
                             failed_apps += 1;
                         }
+                        
+                        results.push(processing_result);
                     }
                     Err(e) => {
                         failed_apps += 1;
                         let error_msg = LogMessage {
                             timestamp: chrono::Utc::now(),
                             level: LogLevel::Error,
-                            message: format!("Failed to process app: {}", e),
+                            message: format!("Processing failed: {}", e),
                         };
-                        let _ = progress_sender.send(error_msg.clone()).await;
-                        all_logs.push(error_msg);
+                        all_logs.push(error_msg.clone());
+                        let _ = progress_sender.send(error_msg).await;
                     }
                 }
             }
         } else {
             // Sequential processing
-            for (index, app_path) in app_paths.iter().enumerate() {
-                let progress_msg = LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Info,
-                    message: format!("PROGRESS:{}/{}", index + 1, total_apps),
-                };
-                let _ = progress_sender.send(progress_msg).await;
-                let progress_msg2 = LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Info,
-                    message: format!("Processing app {}/{}: {} (in-place)", index + 1, app_paths.len(), app_path.file_name().unwrap_or_default().to_string_lossy()),
-                };
-                let _ = progress_sender.send(progress_msg2.clone()).await;
-                all_logs.push(progress_msg2);
-
-                match Self::process_single_app_in_batch(app_path, config, progress_sender.clone()).await {
-                    Ok(result) => {
-                        all_results.push(result.clone());
-                        all_logs.extend(result.logs.clone());
+            for app_path in app_paths {
+                let _is_elevated = elevated_apps.contains(&app_path);
+                match Self::process_single_app_in_batch_with_permissions(&app_path, config, progress_sender.clone(), false).await {
+                    Ok(processing_result) => {
+                        total_original_size += processing_result.original_size;
+                        total_final_size += processing_result.final_size;
+                        total_saved_space += processing_result.saved_space;
+                        all_logs.extend(processing_result.logs.clone());
                         
-                        if result.success {
+                        if processing_result.success {
                             successful_apps += 1;
-                            total_original_size += result.original_size;
-                            total_final_size += result.final_size;
-                            total_saved_space += result.saved_space;
                         } else {
                             failed_apps += 1;
                         }
+                        
+                        results.push(processing_result);
                     }
                     Err(e) => {
                         failed_apps += 1;
                         let error_msg = LogMessage {
                             timestamp: chrono::Utc::now(),
                             level: LogLevel::Error,
-                            message: format!("Failed to process {}: {}", app_path.display(), e),
+                            message: format!("Processing failed: {}", e),
                         };
-                        let _ = progress_sender.send(error_msg.clone()).await;
-                        all_logs.push(error_msg);
+                        all_logs.push(error_msg.clone());
+                        let _ = progress_sender.send(error_msg).await;
                     }
                 }
             }
         }
-
-        // Send batch completion message
-        let completion_msg = LogMessage {
-            timestamp: chrono::Utc::now(),
-            level: LogLevel::Success,
-            message: format!(
-                "Batch processing completed. Success: {}, Failed: {}, Total saved: {}",
-                successful_apps,
-                failed_apps,
-                Self::human_readable_size(total_saved_space, 2)
-            ),
-        };
-        let _ = progress_sender.send(completion_msg.clone()).await;
-        all_logs.push(completion_msg);
 
         // Save logs to file if requested
         if config.save_logs_to_file {
@@ -529,7 +431,7 @@ impl FileOperations {
         }
 
         Ok(BatchProcessingResult {
-            results: all_results,
+            results,
             total_original_size,
             total_final_size,
             total_saved_space,
@@ -539,57 +441,116 @@ impl FileOperations {
         })
     }
 
-    /// Process a single app as part of a batch
-    async fn process_single_app_in_batch(
+    async fn process_single_app_in_batch_with_permissions(
         app_path: &Path,
         config: &BatchProcessingConfig,
         progress_sender: mpsc::Sender<LogMessage>,
+        is_elevated: bool,
     ) -> Result<ProcessingResult> {
         let mut logs = Vec::new();
-        let output_path = None;
-        let _seen_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
-
-        // Calculate initial size
-        let initial_size = Self::calculate_directory_size(app_path).await?;
+        let original_size = Self::calculate_directory_size(app_path).await?;
         
-        let start_msg = LogMessage {
-            timestamp: chrono::Utc::now(),
-            level: LogLevel::Info,
-            message: format!(
-                "Processing {} (Initial size: {})",
-                app_path.file_name().unwrap_or_default().to_string_lossy(),
-                Self::human_readable_size(initial_size, 2)
-            ),
-        };
-        let _ = progress_sender.send(start_msg.clone()).await;
-        logs.push(start_msg);
+        // Check for App Store protections
+        if Self::check_app_store_protections(app_path).await? {
+            let msg = format!("App Store app detected: {}. These apps have additional protections that may prevent modification.", app_path.display());
+            warn!("{}", msg);
+            logs.push(LogMessage {
+                timestamp: chrono::Utc::now(),
+                level: LogLevel::Warning,
+                message: msg,
+            });
+            
+            // For elevated apps, we can proceed with a warning
+            if !is_elevated {
+                // Send the warning message
+                let _ = progress_sender.send(LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Warning,
+                    message: format!("Skipping App Store app due to protections: {}", app_path.display()),
+                }).await;
+                
+                return Ok(ProcessingResult {
+                    app_path: app_path.to_path_buf(),
+                    output_path: None,
+                    original_size,
+                    final_size: original_size,
+                    saved_space: 0,
+                    success: false,
+                    error_message: Some("App Store app has protections that prevent modification".to_string()),
+                    logs,
+                });
+            }
+        }
 
-        // Process the app
-        let process_result = Self::process_app(app_path, &config.processing_config, progress_sender.clone()).await?;
-        logs.extend(process_result.logs);
+        let mut processed_files = 0;
+        let mut total_files = 0;
 
-        // Calculate final size
+        // Count total files first
+        for entry in WalkDir::new(app_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let file_path = entry.path();
+            if BinaryProcessor::is_mach_binary(file_path)? {
+                total_files += 1;
+            }
+        }
+
+        // Process files
+        for entry in WalkDir::new(app_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let file_path = entry.path();
+            
+            if BinaryProcessor::is_mach_binary(file_path)? {
+                // Remove unwanted architectures
+                let mut file_logs = BinaryProcessor::remove_architectures(file_path, &config.processing_config.target_architecture).await?;
+                logs.append(&mut file_logs);
+
+                // Sign if needed
+                if !config.processing_config.no_sign {
+                    let mut sign_logs = BinaryProcessor::sign_with_ldid(file_path, config.processing_config.no_entitlements).await?;
+                    logs.append(&mut sign_logs);
+                }
+
+                processed_files += 1;
+                
+                // Send progress update
+                let progress_msg = LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Info,
+                    message: format!(
+                        "Processed {}/{} files in {}",
+                        processed_files,
+                        total_files,
+                        app_path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                };
+                let _ = progress_sender.send(progress_msg.clone()).await;
+            }
+        }
+
+        // Sign entire app with codesign if requested
+        if config.processing_config.use_codesign {
+            let mut codesign_logs = Self::codesign_app(app_path, config.processing_config.no_entitlements).await?;
+            logs.append(&mut codesign_logs);
+        }
+
         let final_size = Self::calculate_directory_size(app_path).await?;
-        let saved_space = initial_size.saturating_sub(final_size);
+        let saved_space = original_size.saturating_sub(final_size);
 
-        let completion_msg = LogMessage {
-            timestamp: chrono::Utc::now(),
-            level: LogLevel::Success,
-            message: format!(
-                "Completed {} (Final size: {}, Saved: {}, {:.1}%)",
-                app_path.file_name().unwrap_or_default().to_string_lossy(),
-                Self::human_readable_size(final_size, 2),
-                Self::human_readable_size(saved_space, 2),
-                if initial_size > 0 { (saved_space as f64 / initial_size as f64) * 100.0 } else { 0.0 }
-            ),
-        };
-        let _ = progress_sender.send(completion_msg.clone()).await;
-        logs.push(completion_msg);
+        // Send all logs
+        for log in &logs {
+            let _ = progress_sender.send(log.clone()).await;
+        }
 
         Ok(ProcessingResult {
             app_path: app_path.to_path_buf(),
-            output_path,
-            original_size: initial_size,
+            output_path: None,
+            original_size,
             final_size,
             saved_space,
             success: true,
@@ -728,46 +689,98 @@ impl FileOperations {
 
     /// Detect the source of an app by checking ownership
     pub async fn detect_app_source(app_path: &Path) -> Result<AppSource> {
-        // Get the metadata of the .app folder
         let metadata = tokio::fs::metadata(app_path).await
             .context("Failed to get app metadata")?;
-        
         let uid = metadata.uid();
-        
-        // On macOS:
-        // - UID 0 (root) typically means system apps
-        // - UID 501 (first user) typically means user-installed apps
-        // - UID 502+ typically means other users or App Store apps
-        
-        // Check if it's in /Applications (system-wide) or ~/Applications (user-specific)
-        let is_system_applications = app_path.starts_with("/Applications");
-        let is_user_applications = app_path.starts_with(&format!("{}/Applications", std::env::var("HOME").unwrap_or_default()));
-        
-        // Additional check for App Store apps: they often have specific ownership patterns
-        // and are typically in /Applications with non-root ownership
-        if is_system_applications && uid != 0 {
-            // Check if it has App Store receipt
-            let receipt_path = app_path.join("Contents/_MASReceipt");
-            if receipt_path.exists() {
+
+        let receipt_path = app_path.join("Contents/_MASReceipt");
+        let has_receipt = receipt_path.exists();
+
+        if has_receipt {
+            if uid == 0 {
+                // App Store app (installed by App Store, owned by root)
                 return Ok(AppSource::AppStore);
-            }
-            
-            // Check if it's owned by the current user (likely user-installed)
-            let current_uid = unsafe { libc::getuid() };
-            if uid == current_uid {
+            } else {
+                // App Store app copied or moved to user, or user-installed with receipt
                 return Ok(AppSource::UserInstalled);
             }
-            
-            // If it's in /Applications but not owned by root and not by current user,
-            // it's likely an App Store app
-            return Ok(AppSource::AppStore);
-        } else if is_user_applications {
-            return Ok(AppSource::UserInstalled);
-        } else if uid == 0 {
-            return Ok(AppSource::System);
+        } else {
+            if uid == 0 {
+                // System app or .pkg-installed app
+                return Ok(AppSource::System);
+            } else {
+                // User-installed app (not from App Store)
+                return Ok(AppSource::UserInstalled);
+            }
+        }
+    }
+
+    /// Check if an app has App Store protections that prevent modification
+    pub async fn check_app_store_protections(app_path: &Path) -> Result<bool> {
+        let metadata = tokio::fs::metadata(app_path).await
+            .context("Failed to get app metadata")?;
+        let uid = metadata.uid();
+        
+        // Check for App Store receipt - this is the most reliable indicator
+        let receipt_path = app_path.join("Contents/_MASReceipt");
+        let has_receipt = receipt_path.exists();
+        
+        if has_receipt && uid == 0 {
+            // App Store app with root ownership - has protections
+            return Ok(true);
         }
         
-        Ok(AppSource::Unknown)
+        // Root-owned apps (system apps or .pkg-installed) have protections
+        if uid == 0 {
+            return Ok(true);
+        }
+        
+        Ok(false)
+    }
+
+    /// Batch process multiple applications
+    pub async fn batch_process_apps(
+        app_paths: Vec<PathBuf>,
+        config: &BatchProcessingConfig,
+        progress_sender: mpsc::Sender<LogMessage>,
+    ) -> Result<BatchProcessingResult> {
+        let mut results = Vec::new();
+        let mut total_saved_space = 0;
+        let mut total_original_size = 0;
+        let mut total_final_size = 0;
+        let mut success_count = 0;
+        let mut failure_count = 0;
+
+        for app_path in app_paths {
+            match Self::process_single_app_in_batch_with_permissions(&app_path, config, progress_sender.clone(), false).await {
+                Ok(result) => {
+                    results.push(result.clone());
+                    total_saved_space += result.saved_space;
+                    total_original_size += result.original_size;
+                    total_final_size += result.final_size;
+                    success_count += 1;
+                }
+                Err(e) => {
+                    failure_count += 1;
+                    let error_msg = LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Error,
+                        message: format!("Failed to process {}: {}", app_path.display(), e),
+                    };
+                    let _ = progress_sender.send(error_msg).await;
+                }
+            }
+        }
+
+        Ok(BatchProcessingResult {
+            results,
+            total_saved_space,
+            total_original_size,
+            total_final_size,
+            successful_apps: success_count,
+            failed_apps: failure_count,
+            all_logs: Vec::new(), // We'll collect logs separately if needed
+        })
     }
 }
 

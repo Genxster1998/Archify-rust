@@ -92,6 +92,21 @@ impl BinaryProcessor {
             message: format!("Processing binary: {}", path.display()),
         });
 
+        // Check if the file is writable
+        if let Ok(metadata) = tokio::fs::metadata(path).await {
+            let permissions = metadata.permissions();
+            if permissions.readonly() {
+                let msg = format!("File is read-only, cannot modify: {}", path.display());
+                warn!("{}", msg);
+                logs.push(LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Warning,
+                    message: msg,
+                });
+                return Ok(logs);
+            }
+        }
+
         // Check if the binary is universal
         if !Self::is_universal(path)? {
             debug!("Binary is not universal, skipping: {:?}", path);
@@ -114,24 +129,36 @@ impl BinaryProcessor {
             return Ok(logs);
         }
 
-        // Create a temporary file for the thinned binary
-        let temp_file = tempfile::NamedTempFile::new()
-            .context("Failed to create temporary file")?;
-        let temp_path = temp_file.path();
+        // Check if binary already has only the target architecture
+        if archs.len() == 1 && archs[0] == target_arch {
+            let msg = format!(
+                "Binary {} already has only target architecture {}",
+                path.display(),
+                target_arch
+            );
+            info!("{}", msg);
+            logs.push(LogMessage {
+                timestamp: chrono::Utc::now(),
+                level: LogLevel::Info,
+                message: msg,
+            });
+            return Ok(logs);
+        }
 
-        // Use lipo to thin the binary
-        let status = TokioCommand::new("lipo")
+        // Use lipo to thin the binary in-place (like the original archify app)
+        let output = TokioCommand::new("lipo")
+            .arg(path)
             .arg("-thin")
             .arg(target_arch)
-            .arg(path)
             .arg("-output")
-            .arg(temp_path)
-            .status()
+            .arg(path)
+            .output()
             .await
             .context("Failed to execute lipo -thin")?;
 
-        if !status.success() {
-            let msg = format!("Failed to thin binary: {:?}", path);
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            let msg = format!("Failed to thin binary: {} (Error: {})", path.display(), error_msg);
             error!("{}", msg);
             logs.push(LogMessage {
                 timestamp: chrono::Utc::now(),
@@ -140,11 +167,6 @@ impl BinaryProcessor {
             });
             return Ok(logs);
         }
-
-        // Replace the original file with the thinned version
-        tokio::fs::rename(temp_path, path)
-            .await
-            .context("Failed to replace original file with thinned version")?;
 
         let msg = format!(
             "Successfully thinned binary {} to {} architecture",

@@ -212,7 +212,6 @@ dependencies = [
  "futures",
  "goblin",
  "indicatif",
- "libc",
  "num_cpus",
  "path-slash",
  "rfd",
