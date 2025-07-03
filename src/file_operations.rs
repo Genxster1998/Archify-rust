@@ -136,7 +136,7 @@ impl FileOperations {
             let has_arm64 = architectures.iter().any(|arch| arch == "arm64" || arch == "arm64e");
             
             if has_x86_64 && has_arm64 {
-                AppType::Universal
+            AppType::Universal
             } else {
                 AppType::Other
             }
@@ -336,7 +336,7 @@ impl FileOperations {
         if !elevated_apps.is_empty() && !has_elevated {
             let msg = "Elevated permissions required for App Store and system apps. Please run with sudo.";
             let _ = progress_sender.send(LogMessage {
-                timestamp: chrono::Utc::now(),
+            timestamp: chrono::Utc::now(),
                 level: LogLevel::Error,
                 message: msg.to_string(),
             }).await;
@@ -520,15 +520,15 @@ impl FileOperations {
                 
                 // Send progress update
                 let progress_msg = LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Info,
-                    message: format!(
+            timestamp: chrono::Utc::now(),
+            level: LogLevel::Info,
+            message: format!(
                         "Processed {}/{} files in {}",
                         processed_files,
                         total_files,
                         app_path.file_name().unwrap_or_default().to_string_lossy()
-                    ),
-                };
+            ),
+        };
                 let _ = progress_sender.send(progress_msg.clone()).await;
             }
         }

@@ -1,7 +1,8 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tokio::process::Command;
 use anyhow::{Context, Result};
+use tokio::net::UnixStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct PrivilegedHelper;
 
@@ -19,279 +20,71 @@ impl PrivilegedHelper {
     pub async fn install_helper() -> Result<()> {
         println!("Installing privileged helper...");
         
-        // Create the helper binary in a temporary location
-        let helper_content = r#"#!/bin/bash
-# Privileged helper for archify - robust thinning implementation
-set -euo pipefail
-
-# Debug: Check current user and permissions
-echo "=== DEBUG INFO ===" >&2
-echo "Current user: $(whoami)" >&2
-echo "Effective user: $(id -u)" >&2
-echo "Effective group: $(id -g)" >&2
-echo "Arguments received: $*" >&2
-echo "Number of arguments: $#" >&2
-echo "==================" >&2
-
-# Logging function
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
-}
-
-# Error handling
-error_exit() {
-    log "ERROR: $1"
-    exit 1
-}
-
-# Check if binary is Mach-O
-is_mach_o() {
-    local binary="$1"
-    file "$binary" 2>/dev/null | grep -q "Mach-O"
-}
-
-# Get architectures from binary
-get_architectures() {
-    local binary="$1"
-    lipo -info "$binary" 2>/dev/null | sed 's/.*: //' | tr ' ' '\n' | grep -E '^(x86_64|arm64|arm64e)$' || true
-}
-
-# Check if binary has specific architecture
-has_architecture() {
-    local binary="$1"
-    local arch="$2"
-    get_architectures "$binary" | grep -q "^${arch}$"
-}
-
-# Sign binary if needed
-sign_binary() {
-    local binary="$1"
-    local no_sign="$2"
-    local use_codesign="$3"
-    
-    if [[ "$no_sign" == "true" ]]; then
-        log "Skipping signing for $binary (--no-sign specified)"
-        return 0
-    fi
-    
-    if [[ "$use_codesign" == "true" ]]; then
-        log "Signing $binary with codesign"
-        if codesign --force --sign - "$binary" 2>/dev/null; then
-            log "Successfully signed $binary with codesign"
-        else
-            log "Warning: Failed to sign $binary with codesign"
-        fi
-    else
-        log "Signing $binary with ldid"
-        if ldid -S "$binary" 2>/dev/null; then
-            log "Successfully signed $binary with ldid"
-        else
-            log "Warning: Failed to sign $binary with ldid"
-        fi
-    fi
-}
-
-# Main thinning function
-thin_binary() {
-    local binary="$1"
-    local target_arch="$2"
-    local no_sign="$3"
-    local use_codesign="$4"
-    
-    log "Processing binary: $binary"
-    
-    # Check if it's a Mach-O binary
-    if ! is_mach_o "$binary"; then
-        log "Skipping non-Mach-O file: $binary"
-        return 0
-    fi
-    
-    # Get current architectures
-    local current_archs=($(get_architectures "$binary"))
-    if [[ ${#current_archs[@]} -eq 0 ]]; then
-        log "No valid architectures found in $binary"
-        return 0
-    fi
-    
-    log "Current architectures: ${current_archs[*]}"
-    
-    # Check if binary already has only the target architecture
-    if [[ ${#current_archs[@]} -eq 1 && "${current_archs[0]}" == "$target_arch" ]]; then
-        log "Binary $binary already has only target architecture $target_arch"
-        return 0
-    fi
-    
-    # Use lipo -thin for in-place thinning (like the original archify app)
-    log "Thinning $binary to $target_arch architecture"
-    if lipo "$binary" -thin "$target_arch" -output "$binary" 2>/dev/null; then
-        log "Successfully thinned $binary to $target_arch"
+        // Get the path to the bundled smjobbless_installer tool
+        let current_exe = std::env::current_exe()
+            .context("Failed to get current executable path")?;
+        let app_bundle_path = current_exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .context("Failed to find app bundle root")?;
+        let installer_path = app_bundle_path
+            .join("Contents")
+            .join("Library")
+            .join("LaunchServices")
+            .join("smjobbless_installer");
         
-        # Sign the binary if needed
-        sign_binary "$binary" "$no_sign" "$use_codesign"
-        log "Successfully processed $binary"
-        return 0
-    else
-        log "Failed to thin $binary to $target_arch"
-        return 1
-    fi
-}
-
-# Main command handler
-if [[ $# -eq 0 ]]; then
-    error_exit "No arguments provided. Usage: $0 <command> [options]"
-fi
-
-case "$1" in
-    "thin")
-        if [[ $# -lt 3 ]]; then
-            error_exit "Usage: $0 thin <app_path> <target_arch> [options]"
-        fi
-        
-        APP_PATH="$2"
-        TARGET_ARCH="$3"
-        NO_SIGN="false"
-        USE_CODESIGN="false"
-        
-        # Parse additional options
-        shift 3
-        while [[ $# -gt 0 ]]; do
-            case $1 in
-                --no-sign) NO_SIGN="true" ;;
-                --use-codesign) USE_CODESIGN="true" ;;
-                *) error_exit "Unknown option: $1" ;;
-            esac
-            shift
-        done
-        
-        # Validate inputs
-        if [[ ! -d "$APP_PATH" ]]; then
-            error_exit "App path does not exist: $APP_PATH"
-        fi
-        
-        if [[ ! "$TARGET_ARCH" =~ ^(x86_64|arm64|arm64e)$ ]]; then
-            error_exit "Invalid target architecture: $TARGET_ARCH"
-        fi
-        
-        log "Starting thinning process"
-        log "App path: $APP_PATH"
-        log "Target architecture: $TARGET_ARCH"
-        log "No sign: $NO_SIGN"
-        log "Use codesign: $USE_CODESIGN"
-        
-        # Find all Mach-O binaries in the app
-        binaries=()
-        while IFS= read -r -d '' file; do
-            if is_mach_o "$file"; then
-                binaries+=("$file")
-            fi
-        done < <(find "$APP_PATH" -type f -print0)
-        
-        log "Found ${#binaries[@]} Mach-O binaries to process"
-        
-        # Process each binary
-        processed_count=0
-        failed_count=0
-        
-        for binary in "${binaries[@]}"; do
-            if thin_binary "$binary" "$TARGET_ARCH" "$NO_SIGN" "$USE_CODESIGN"; then
-                ((processed_count++))
-            else
-                ((failed_count++))
-            fi
-        done
-        
-        log "Thinning completed: $processed_count processed, $failed_count failed"
-        
-        if [[ $failed_count -eq 0 ]]; then
-            echo "Successfully thinned $APP_PATH"
-        else
-            error_exit "Thinning completed with $failed_count failures"
-        fi
-        ;;
-    *)
-        error_exit "Unknown command: $1"
-        ;;
-esac
-"#;
-        
-        let temp_helper_path = "/tmp/archify_helper_install";
-        tokio::fs::write(temp_helper_path, helper_content).await?;
-        
-        // Set executable permissions
-        tokio::fs::set_permissions(temp_helper_path, std::fs::Permissions::from_mode(0o755)).await?;
-        
-        // Create the plist file
-        let plist_content = include_str!("../helper/com.archify.helper.plist");
-        let temp_plist_path = "/tmp/com.archify.helper.plist";
-        tokio::fs::write(temp_plist_path, plist_content).await?;
-        
-        // Install using SMJobBless (this will prompt for admin password)
-        let status = Command::new("sudo")
-            .args(&[
-                "cp", temp_helper_path, "/Library/PrivilegedHelperTools/com.archify.helper"
-            ])
-            .status()
-            .await?;
-            
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to copy helper binary"));
+        if !installer_path.exists() {
+            return Err(anyhow::anyhow!("smjobbless_installer not found at: {:?}", installer_path));
         }
         
-        let status = Command::new("sudo")
-            .args(&[
-                "cp", temp_plist_path, "/Library/LaunchDaemons/com.archify.helper.plist"
-            ])
+        // Call the installer tool (this will show the system authentication dialog)
+        let status = Command::new(installer_path)
             .status()
-            .await?;
-            
+            .await
+            .context("Failed to execute smjobbless_installer")?;
+        
         if !status.success() {
-            return Err(anyhow::anyhow!("Failed to copy plist file"));
+            return Err(anyhow::anyhow!("Failed to install privileged helper (see logs for details)"));
         }
         
-        // Set proper permissions
-        let status = Command::new("sudo")
-            .args(&[
-                "chown", "root:wheel", "/Library/PrivilegedHelperTools/com.archify.helper"
-            ])
-            .status()
-            .await?;
-            
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to set helper ownership"));
-        }
-        
-        let status = Command::new("sudo")
-            .args(&[
-                "chown", "root:wheel", "/Library/LaunchDaemons/com.archify.helper.plist"
-            ])
-            .status()
-            .await?;
-            
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to set plist ownership"));
-        }
-        
-        // Load the service
-        let status = Command::new("sudo")
-            .args(&[
-                "launchctl", "load", "/Library/LaunchDaemons/com.archify.helper.plist"
-            ])
-            .status()
-            .await?;
-            
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to load helper service"));
-        }
-        
-        // Clean up temp files
-        let _ = tokio::fs::remove_file(temp_helper_path).await;
-        let _ = tokio::fs::remove_file(temp_plist_path).await;
-        
-        println!("Privileged helper installed and loaded successfully");
+        println!("Privileged helper installed successfully!");
         Ok(())
     }
 
-    /// Send a thinning request to the privileged helper
+    /// Uninstall the privileged helper
+    pub async fn uninstall_helper() -> Result<()> {
+        println!("Uninstalling privileged helper...");
+        // Use sudo to unload and remove the helper and plist
+        let status = Command::new("sudo")
+            .args(["launchctl", "unload", "/Library/LaunchDaemons/com.archify.helper.plist"])
+            .status()
+            .await
+            .context("Failed to unload helper plist")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to unload helper plist"));
+        }
+        let status = Command::new("sudo")
+            .args(["rm", "-f", "/Library/LaunchDaemons/com.archify.helper.plist"])
+            .status()
+            .await
+            .context("Failed to remove helper plist")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to remove helper plist"));
+        }
+        let status = Command::new("sudo")
+            .args(["rm", "-f", "/Library/PrivilegedHelperTools/com.archify.helper"])
+            .status()
+            .await
+            .context("Failed to remove helper binary")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to remove helper binary"));
+        }
+        println!("Privileged helper uninstalled successfully!");
+        Ok(())
+    }
+
+    /// Thin an app using the privileged helper
     pub async fn thin_app(
         app_path: &Path,
         target_arch: &str,
@@ -299,37 +92,95 @@ esac
         _no_entitlements: bool,
         use_codesign: bool,
     ) -> Result<String> {
-        // Use sudo to run the helper with root permissions
-        
-        let mut args = vec![
-            "/Library/PrivilegedHelperTools/com.archify.helper",
-            "thin",
-            app_path.to_str().unwrap(),
-            target_arch,
-        ];
-        
-        if no_sign {
-            args.push("--no-sign");
+        if !Self::is_installed() {
+            return Err(anyhow::anyhow!("Privileged helper is not installed"));
         }
-        if use_codesign {
-            args.push("--use-codesign");
-        }
-        
-        let output = Command::new("sudo")
-            .args(&args)
-            .output()
+
+        // Communicate with the running helper daemon over its UNIX socket
+        let socket_path = "/var/run/com.archify.helper.sock";
+
+        let cmd_line = {
+            let mut c = String::from("thin ");
+            c.push('"');
+            c.push_str(&app_path.to_string_lossy().replace('"', "\\\""));
+            c.push('"');
+            c.push(' ');
+            c.push_str(target_arch);
+            if no_sign { c.push_str(" --no-sign"); }
+            if use_codesign { c.push_str(" --use-codesign"); }
+            c.push('\n');
+            c
+        };
+
+        let mut stream = UnixStream::connect(socket_path)
             .await
-            .context("Failed to execute privileged helper with sudo")?;
-            
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            .context("Failed to connect to helper daemon socket")?;
+
+        stream.write_all(cmd_line.as_bytes()).await
+            .context("Failed to send command to helper daemon")?;
+
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).await
+            .context("Failed reading reply from helper daemon")?;
+
+        let reply_str = String::from_utf8_lossy(&reply);
+        if reply_str.starts_with("OK") {
+            Ok(reply_str.into())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!(
-                "Helper failed with status {}: {}",
-                output.status,
-                stderr
-            ))
+            Err(anyhow::anyhow!(format!("Helper error: {}", reply_str.trim())))
         }
     }
+
+    /// Get helper status information
+    pub fn get_helper_status() -> HelperStatus {
+        let is_installed = Self::is_installed();
+        
+        if !is_installed {
+            return HelperStatus {
+                is_installed: false,
+                is_running: false,
+                version: None,
+                error: Some("Helper not installed".to_string()),
+            };
+        }
+
+        // Check if the helper service is running
+        let is_running = match std::process::Command::new("launchctl")
+            .args(&["list", "com.archify.helper"])
+            .output()
+        {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        };
+
+        // Try to get version info
+        let version = match std::process::Command::new("/Library/PrivilegedHelperTools/com.archify.helper")
+            .arg("--version")
+            .output()
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    String::from_utf8(output.stdout).ok()
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+
+        HelperStatus {
+            is_installed,
+            is_running,
+            version,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HelperStatus {
+    pub is_installed: bool,
+    pub is_running: bool,
+    pub version: Option<String>,
+    pub error: Option<String>,
 } 

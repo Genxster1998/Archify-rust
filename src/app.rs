@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::runtime::Runtime;
 use rfd::FileDialog;
-use crate::privileged_helper::PrivilegedHelper;
+use crate::privileged_helper::{PrivilegedHelper, HelperStatus};
 use std::sync::OnceLock;
+
+
 
 // Global runtime for the GUI app
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -36,6 +38,10 @@ pub struct ArchifyApp {
     pub elevated_apps: Vec<PathBuf>,
     pub user_apps: Vec<PathBuf>,
     pub elevated_confirmed: bool,
+    // Helper status
+    pub helper_status: HelperStatus,
+    pub show_helper_install_dialog: bool,
+
 }
 
 impl ArchifyApp {
@@ -44,6 +50,8 @@ impl ArchifyApp {
         let _runtime = RUNTIME.get_or_init(|| {
             Runtime::new().expect("Failed to create Tokio runtime")
         });
+        
+
         
         Self {
             selected_tab: 0,
@@ -87,6 +95,14 @@ impl ArchifyApp {
             elevated_apps: Vec::new(),
             user_apps: Vec::new(),
             elevated_confirmed: false,
+            // Helper status
+            helper_status: HelperStatus {
+                is_installed: false,
+                is_running: false,
+                version: None,
+                error: None,
+            },
+            show_helper_install_dialog: false,
         }
     }
 
@@ -345,6 +361,12 @@ impl ArchifyApp {
         });
     }
 
+    fn update_helper_status(&mut self) {
+        self.helper_status = PrivilegedHelper::get_helper_status();
+        }
+
+
+
     fn render_applications_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Scan Applications").clicked() && !self.is_scanning {
@@ -497,6 +519,82 @@ impl ArchifyApp {
             ui.label("Scan Depth:");
             ui.add(egui::Slider::new(&mut self.scan_depth, 1..=8));
         });
+
+        ui.separator();
+        ui.heading("Privileged Helper");
+        
+        // Update helper status
+        self.update_helper_status();
+        
+        // Display helper status
+        ui.label("Helper Status:");
+        if self.helper_status.is_installed {
+            ui.colored_label(egui::Color32::GREEN, "✓ Installed");
+            if self.helper_status.is_running {
+                ui.colored_label(egui::Color32::GREEN, "✓ Running");
+            } else {
+                ui.colored_label(egui::Color32::YELLOW, "⚠ Not Running");
+            }
+            if let Some(version) = &self.helper_status.version {
+                ui.label(format!("Version: {}", version));
+            }
+        } else {
+            ui.colored_label(egui::Color32::RED, "✗ Not Installed");
+            if let Some(error) = &self.helper_status.error {
+                ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
+            }
+        }
+        
+        ui.separator();
+        
+        // Helper management buttons
+        ui.horizontal(|ui| {
+            if ui.button("Install Helper").clicked() {
+                self.show_helper_install_dialog = true;
+            }
+            
+            if self.helper_status.is_installed && ui.button("Uninstall Helper").clicked() {
+                let runtime = RUNTIME.get().expect("Runtime not initialized");
+                runtime.spawn(async {
+                    if let Err(e) = PrivilegedHelper::uninstall_helper().await {
+                        eprintln!("Failed to uninstall helper: {}", e);
+                    }
+                });
+            }
+        });
+        
+        if self.show_helper_install_dialog {
+            egui::Window::new("Install Privileged Helper")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.heading("Install Privileged Helper");
+                    ui.label("The privileged helper is required to thin applications that require elevated permissions.");
+                    ui.label("This will install a system service that runs with root privileges.");
+                    ui.separator();
+                    ui.label("⚠️ Security Note:");
+                    ui.label("• The helper will be installed in /Library/PrivilegedHelperTools/");
+                    ui.label("• It will run as a system service with root privileges");
+                    ui.label("• You will be prompted for your administrator password");
+                    ui.separator();
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Install").clicked() {
+                            let runtime = RUNTIME.get().expect("Runtime not initialized");
+                            runtime.spawn(async {
+                                if let Err(e) = PrivilegedHelper::install_helper().await {
+                                    eprintln!("Failed to install helper: {}", e);
+                                }
+                            });
+                            self.show_helper_install_dialog = false;
+                        }
+                        
+                        if ui.button("Cancel").clicked() {
+                            self.show_helper_install_dialog = false;
+                        }
+                    });
+                });
+        }
     }
     
     fn render_logs_tab(&mut self, ui: &mut egui::Ui) {
@@ -609,6 +707,8 @@ impl eframe::App for ArchifyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle scanning messages
         self.handle_scanning_messages();
+        
+
         
         egui::CentralPanel::default().show(ctx, |ui| {
             // Tabs

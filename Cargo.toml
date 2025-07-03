@@ -60,8 +60,27 @@ goblin = "0.8"
 # CPU core detection
 num_cpus = "1.16"
 
+# App bundling
+#cargo-bundle = "0.3"
+
+# Added for helper binary
+libc = "0.2"
+
+# Added for shell-words crate
+shell-words = "1.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS specific dependencies
 cocoa = "0.25"
 core-foundation = "0.9"
 core-graphics = "0.23" 
+
+[package.metadata.bundle]
+name = "Archify"
+identifier = "com.archify.app"
+icon = ["assets/icon.icns"]
+resources = [
+  "helper/com.archify.helper.launchd.plist"
+]
+category = "public.app-category.utilities"
+copyright = "GPL-3.0" 

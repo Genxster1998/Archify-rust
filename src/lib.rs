@@ -8,7 +8,6 @@ pub mod helper;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::file_operations::FileOperations;
     use crate::types::AppSource;
     use std::path::PathBuf;

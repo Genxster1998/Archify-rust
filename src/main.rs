@@ -1,5 +1,7 @@
 use eframe::egui;
 use tracing_subscriber;
+use std::fs;
+use eframe::icon_data::from_png_bytes;
 
 mod app;
 mod binary_processor;
@@ -65,10 +67,17 @@ fn main() -> Result<(), eframe::Error> {
         return Ok(());
     }
 
+    // Load app icon from assets
+    let icon_data = fs::read("assets/icon.png").ok();
+    let icon = icon_data.and_then(|data| {
+        from_png_bytes(&data).ok()
+    });
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 700.0])
-            .with_min_inner_size([600.0, 400.0]),
+            .with_inner_size([450.0, 770.0])
+            .with_min_inner_size([400.0, 370.0])
+            .with_icon(icon.unwrap_or_default()),
         ..Default::default()
     };
 
