@@ -1,6 +1,5 @@
 use eframe::egui;
 use tracing_subscriber;
-use std::fs;
 use eframe::icon_data::from_png_bytes;
 
 mod app;
@@ -67,11 +66,9 @@ fn main() -> Result<(), eframe::Error> {
         return Ok(());
     }
 
-    // Load app icon from assets
-    let icon_data = fs::read("assets/icon.png").ok();
-    let icon = icon_data.and_then(|data| {
-        from_png_bytes(&data).ok()
-    });
+    // Embed app icon as bytes at compile time
+    let icon_data = include_bytes!("../assets/icon.png");
+    let icon = from_png_bytes(icon_data).ok();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
