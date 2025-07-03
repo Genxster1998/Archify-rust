@@ -5,8 +5,32 @@ use std::process::Command;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use shell_words;
+use std::sync::{Arc, Mutex};
 
 const SOCKET_PATH: &str = "/var/run/com.archify.helper.sock";
+
+// Custom logger that writes to both a buffer and stderr
+struct Logger {
+    buffer: Arc<Mutex<String>>,
+}
+
+impl Logger {
+    fn new() -> Self {
+        Logger {
+            buffer: Arc::new(Mutex::new(String::new())),
+        }
+    }
+    fn log(&self, msg: &str) {
+        // Write to buffer
+        self.buffer.lock().unwrap().push_str(msg);
+        self.buffer.lock().unwrap().push('\n');
+        // Also write to stderr
+        eprintln!("{}", msg);
+    }
+    fn get_logs(&self) -> String {
+        self.buffer.lock().unwrap().clone()
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +61,7 @@ async fn main() -> Result<()> {
             let no_sign = args.contains(&"--no-sign".to_string());
             let use_codesign = args.contains(&"--use-codesign".to_string());
             
-            thin_app(app_path, target_arch, no_sign, use_codesign).await?;
+            thin_app(app_path, target_arch, no_sign, use_codesign, &Logger::new()).await?;
         }
         "--help" | "help" => {
             println!("Archify Helper - Privileged helper for thinning macOS applications");
@@ -66,7 +90,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn thin_app(app_path: &str, target_arch: &str, no_sign: bool, use_codesign: bool) -> Result<()> {
+async fn thin_app(app_path: &str, target_arch: &str, no_sign: bool, use_codesign: bool, logger: &Logger) -> Result<()> {
     eprintln!("[HELPER] Starting thinning process for: {}", app_path);
     eprintln!("[HELPER] Target architecture: {}", target_arch);
     eprintln!("[HELPER] No sign: {}, Use codesign: {}", no_sign, use_codesign);
@@ -103,7 +127,7 @@ async fn thin_app(app_path: &str, target_arch: &str, no_sign: bool, use_codesign
     let mut failed_count = 0;
 
     for binary in binaries {
-        if thin_binary(&binary, target_arch, no_sign, use_codesign).await {
+        if thin_binary(&binary, target_arch, no_sign, use_codesign, logger).await {
             processed_count += 1;
         } else {
             failed_count += 1;
@@ -128,7 +152,7 @@ async fn is_mach_o_binary(path: &str) -> bool {
     }
 }
 
-async fn thin_binary(binary_path: &str, target_arch: &str, no_sign: bool, use_codesign: bool) -> bool {
+async fn thin_binary(binary_path: &str, target_arch: &str, no_sign: bool, use_codesign: bool, logger: &Logger) -> bool {
     eprintln!("[HELPER] Processing binary: {}", binary_path);
 
     // Get current architectures using `lipo -archs` which outputs a plain
@@ -181,9 +205,9 @@ async fn thin_binary(binary_path: &str, target_arch: &str, no_sign: bool, use_co
             // Sign the binary if needed
             if !no_sign {
                 if use_codesign {
-                    sign_with_codesign(binary_path).await;
+                    sign_with_codesign(binary_path, logger).await;
                 } else {
-                    sign_with_ldid(binary_path).await;
+                    sign_with_ldid(binary_path, logger).await;
                 }
             }
             
@@ -196,7 +220,7 @@ async fn thin_binary(binary_path: &str, target_arch: &str, no_sign: bool, use_co
     }
 }
 
-async fn sign_with_codesign(binary_path: &str) {
+async fn sign_with_codesign(binary_path: &str, logger: &Logger) {
     let status = Command::new("codesign")
         .arg("--force")
         .arg("--sign")
@@ -206,15 +230,15 @@ async fn sign_with_codesign(binary_path: &str) {
 
     match status {
         Ok(status) if status.success() => {
-            eprintln!("[HELPER] Successfully signed with codesign: {}", binary_path);
+            logger.log(&format!("[HELPER] Successfully signed with codesign: {}", binary_path));
         }
         _ => {
-            eprintln!("[HELPER] Warning: Failed to sign with codesign: {}", binary_path);
+            logger.log(&format!("[HELPER] Warning: Failed to sign with codesign: {}", binary_path));
         }
     }
 }
 
-async fn sign_with_ldid(binary_path: &str) {
+async fn sign_with_ldid(binary_path: &str, logger: &Logger) {
     // Try to find ldid
     let ldid_paths = ["/usr/local/bin/ldid", "/opt/homebrew/bin/ldid", "/usr/bin/ldid"];
     let mut ldid_path = None;
@@ -234,14 +258,14 @@ async fn sign_with_ldid(binary_path: &str) {
 
         match status {
             Ok(status) if status.success() => {
-                eprintln!("[HELPER] Successfully signed with ldid: {}", binary_path);
+                logger.log(&format!("[HELPER] Successfully signed with ldid: {}", binary_path));
             }
             _ => {
-                eprintln!("[HELPER] Warning: Failed to sign with ldid: {}", binary_path);
+                logger.log(&format!("[HELPER] Warning: Failed to sign with ldid: {}", binary_path));
             }
         }
     } else {
-        eprintln!("[HELPER] Warning: ldid not found, skipping signing for: {}", binary_path);
+        logger.log(&format!("[HELPER] Warning: ldid not found, skipping signing for: {}", binary_path));
     }
 }
 
@@ -311,12 +335,15 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
                 let arch = &parts[2];
                 let no_sign = parts.iter().any(|s| s == "--no-sign");
                 let use_codesign = parts.iter().any(|s| s == "--use-codesign");
-                match thin_app(app_path, arch, no_sign, use_codesign).await {
-                    Ok(_) => writer.write_all(b"OK\n").await?,
-                    Err(e) => {
-                        let msg = format!("ERR {}\n", e);
-                        writer.write_all(msg.as_bytes()).await?;
-                    }
+                let logger = Logger::new();
+                let result = thin_app(app_path, arch, no_sign, use_codesign, &logger).await;
+                let log_str = logger.get_logs();
+                if let Err(e) = result {
+                    let msg = format!("ERR {}\n{}", e, log_str);
+                    writer.write_all(msg.as_bytes()).await?;
+                } else {
+                    let msg = format!("OK\n{}", log_str);
+                    writer.write_all(msg.as_bytes()).await?;
                 }
             }
         }

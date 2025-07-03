@@ -41,6 +41,8 @@ pub struct ArchifyApp {
     // Helper status
     pub helper_status: HelperStatus,
     pub show_helper_install_dialog: bool,
+    pub helper_log_receiver: Option<mpsc::Receiver<LogMessage>>,
+    pub processing_log_receiver: Option<mpsc::Receiver<LogMessage>>,
 
 }
 
@@ -103,6 +105,8 @@ impl ArchifyApp {
                 error: None,
             },
             show_helper_install_dialog: false,
+            helper_log_receiver: None,
+            processing_log_receiver: None,
         }
     }
 
@@ -233,7 +237,8 @@ impl ArchifyApp {
         // Update batch config with current processing config
         self.batch_config.processing_config = self.processing_config.clone();
 
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
+        self.processing_log_receiver = Some(rx);
         let config = self.batch_config.clone();
         let elevated_apps = if elevated { apps.clone() } else { Vec::new() };
 
@@ -248,11 +253,6 @@ impl ArchifyApp {
             }
         });
 
-        // Handle log messages
-        while let Ok(log) = rx.try_recv() {
-            self.logs.push(log);
-        }
-
         self.is_processing = false;
         let permission_type = if elevated { "elevated" } else { "user" };
         self.add_log(LogLevel::Info, format!("{} processing completed", permission_type));
@@ -262,11 +262,8 @@ impl ArchifyApp {
         self.show_elevated_dialog = false;
         self.elevated_confirmed = true;
 
-        // If there are elevated apps, use privileged helper
         if !self.elevated_apps.is_empty() {
-            // Check if helper is installed
             if !PrivilegedHelper::is_installed() {
-                // Install helper if not present
                 let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
                 rt.spawn(async move {
                     if let Err(e) = PrivilegedHelper::install_helper().await {
@@ -275,12 +272,13 @@ impl ArchifyApp {
                 });
                 self.add_log(LogLevel::Warning, "Installing privileged helper...".to_string());
             } else {
-                // Process elevated apps using helper
+                let (log_tx, log_rx) = mpsc::channel(100);
+                self.helper_log_receiver = Some(log_rx);
                 for app_path in &self.elevated_apps {
                     let app_path = app_path.clone();
                     let config = self.processing_config.clone();
+                    let log_tx = log_tx.clone();
                     let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
-                    
                     rt.spawn(async move {
                         match PrivilegedHelper::thin_app(
                             &app_path,
@@ -289,22 +287,38 @@ impl ArchifyApp {
                             config.no_entitlements,
                             config.use_codesign,
                         ).await {
-                            Ok(result) => {
-                                println!("Successfully thinned {}: {}", app_path.display(), result);
+                            Ok((status, log_lines)) => {
+                                // Print summary to terminal
+                                println!("Successfully thinned {}: {}", app_path.display(), status);
+                                let _ = log_tx.send(LogMessage {
+                                    timestamp: chrono::Utc::now(),
+                                    level: LogLevel::Info,
+                                    message: format!("Successfully thinned {}: {}", app_path.display(), status),
+                                }).await;
+                                for line in log_lines {
+                                    let _ = log_tx.send(LogMessage {
+                                        timestamp: chrono::Utc::now(),
+                                        level: LogLevel::Info,
+                                        message: line,
+                                    }).await;
+                                }
                             }
                             Err(e) => {
+                                // Print summary to terminal
                                 eprintln!("Failed to thin {}: {}", app_path.display(), e);
+                                let _ = log_tx.send(LogMessage {
+                                    timestamp: chrono::Utc::now(),
+                                    level: LogLevel::Error,
+                                    message: format!("Failed to thin {}: {}", app_path.display(), e),
+                                }).await;
                             }
                         }
                     });
                 }
+                drop(log_tx);
             }
         }
-
-        // Process user apps normally
         self.process_apps_with_permissions(self.user_apps.clone(), false);
-
-        // Clear the categorized lists
         self.elevated_apps.clear();
         self.user_apps.clear();
         self.elevated_confirmed = false;
@@ -365,7 +379,21 @@ impl ArchifyApp {
         self.helper_status = PrivilegedHelper::get_helper_status();
         }
 
+    pub fn handle_helper_logs(&mut self) {
+        if let Some(ref mut rx) = self.helper_log_receiver {
+            while let Ok(log) = rx.try_recv() {
+                self.logs.push(log);
+            }
+        }
+    }
 
+    pub fn handle_processing_logs(&mut self) {
+        if let Some(ref mut rx) = self.processing_log_receiver {
+            while let Ok(log) = rx.try_recv() {
+                self.logs.push(log);
+            }
+        }
+    }
 
     fn render_applications_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -705,10 +733,9 @@ impl ArchifyApp {
 
 impl eframe::App for ArchifyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle scanning messages
         self.handle_scanning_messages();
-        
-
+        self.handle_helper_logs();
+        self.handle_processing_logs();
         
         egui::CentralPanel::default().show(ctx, |ui| {
             // Tabs

@@ -91,7 +91,7 @@ impl PrivilegedHelper {
         no_sign: bool,
         _no_entitlements: bool,
         use_codesign: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<String>)> {
         if !Self::is_installed() {
             return Err(anyhow::anyhow!("Privileged helper is not installed"));
         }
@@ -124,8 +124,11 @@ impl PrivilegedHelper {
             .context("Failed reading reply from helper daemon")?;
 
         let reply_str = String::from_utf8_lossy(&reply);
-        if reply_str.starts_with("OK") {
-            Ok(reply_str.into())
+        let mut lines = reply_str.lines();
+        let status_line = lines.next().unwrap_or("");
+        let log_lines: Vec<String> = lines.map(|l| l.to_string()).collect();
+        if status_line.starts_with("OK") {
+            Ok((status_line.to_string(), log_lines))
         } else {
             Err(anyhow::anyhow!(format!("Helper error: {}", reply_str.trim())))
         }
