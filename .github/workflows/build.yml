@@ -1,0 +1,170 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test on ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Install Xcode Command Line Tools
+        run: |
+          xcode-select --install || true
+          sudo xcodebuild -license accept
+
+      - name: Install clang for SMJobBless installer
+        run: |
+          # Ensure clang is available
+          clang --version
+
+      - name: Create ICNS icon
+        run: |
+          echo "Creating ICNS icon..."
+          
+          # Create iconset directory
+          ICONSET_DIR="assets/icon.iconset"
+          mkdir -p "$ICONSET_DIR"
+          
+          # Create different icon sizes
+          sips -z 16 16     assets/icon.png --out "$ICONSET_DIR/icon_16x16.png"
+          sips -z 32 32     assets/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png"
+          sips -z 32 32     assets/icon.png --out "$ICONSET_DIR/icon_32x32.png"
+          sips -z 64 64     assets/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png"
+          sips -z 128 128   assets/icon.png --out "$ICONSET_DIR/icon_128x128.png"
+          sips -z 256 256   assets/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png"
+          sips -z 256 256   assets/icon.png --out "$ICONSET_DIR/icon_256x256.png"
+          sips -z 512 512   assets/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png"
+          sips -z 512 512   assets/icon.png --out "$ICONSET_DIR/icon_512x512.png"
+          sips -z 1024 1024 assets/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png"
+          
+          # Convert iconset to ICNS
+          iconutil -c icns "$ICONSET_DIR" -o "assets/icon.icns"
+          
+          # Clean up iconset directory
+          rm -rf "$ICONSET_DIR"
+          
+          echo "ICNS icon created successfully"
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build helper binary
+        run: |
+          echo "Building helper binary for ${{ matrix.target }}..."
+          cargo build --release --bin helper --target ${{ matrix.target }}
+
+      - name: Build main application
+        run: |
+          echo "Building main application for ${{ matrix.target }}..."
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Build SMJobBless installer
+        run: |
+          echo "Building SMJobBless installer..."
+          make clean
+          make
+
+      - name: Create app bundle
+        run: |
+          echo "Creating app bundle for ${{ matrix.target }}..."
+          cargo bundle --release --target ${{ matrix.target }}
+
+      - name: Setup app bundle structure
+        run: |
+          echo "Setting up app bundle structure..."
+          
+          # Define paths
+          APP_BUNDLE="target/${{ matrix.target }}/release/bundle/osx/Archify.app"
+          LAUNCHSERVICES_DIR="$APP_BUNDLE/Contents/Library/LaunchServices"
+          HELPER_SOURCE="target/${{ matrix.target }}/release/helper"
+          HELPER_PLIST_SOURCE="helper/com.archify.helper.plist"
+          INSTALLER_SOURCE="smjobbless_installer"
+          
+          # Create LaunchServices directory
+          mkdir -p "$LAUNCHSERVICES_DIR"
+          
+          # Copy helper binary, plist, and installer
+          cp "$HELPER_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper"
+          cp "$HELPER_PLIST_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper.plist"
+          cp "$INSTALLER_SOURCE" "$LAUNCHSERVICES_DIR/smjobbless_installer"
+          
+          # Set executable permissions
+          chmod +x "$LAUNCHSERVICES_DIR/com.archify.helper"
+          chmod +x "$LAUNCHSERVICES_DIR/smjobbless_installer"
+          
+          echo "App bundle structure setup complete"
+
+      - name: Verify app bundle
+        run: |
+          echo "Verifying app bundle..."
+          
+          APP_BUNDLE="target/${{ matrix.target }}/release/bundle/osx/Archify.app"
+          
+          # Check if app bundle exists
+          if [ ! -d "$APP_BUNDLE" ]; then
+            echo "App bundle not found at $APP_BUNDLE"
+            exit 1
+          fi
+          
+          # Check if main executable exists
+          if [ ! -f "$APP_BUNDLE/Contents/MacOS/archify-rust" ]; then
+            echo "Main executable not found"
+            exit 1
+          fi
+          
+          # Check if helper binary exists
+          if [ ! -f "$APP_BUNDLE/Contents/Library/LaunchServices/com.archify.helper" ]; then
+            echo "Helper binary not found"
+            exit 1
+          fi
+          
+          # Check if installer exists
+          if [ ! -f "$APP_BUNDLE/Contents/Library/LaunchServices/smjobbless_installer" ]; then
+            echo "SMJobBless installer not found"
+            exit 1
+          fi
+          
+          echo "App bundle verification passed"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bundle/osx/Archify.app
+          retention-days: 7 

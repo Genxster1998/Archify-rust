@@ -1,0 +1,341 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v0.2.1)'
+        required: true
+        default: 'v0.2.1'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+        include:
+          - target: x86_64-apple-darwin
+            arch: x86_64
+            suffix: x86_64
+          - target: aarch64-apple-darwin
+            arch: arm64
+            suffix: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Install Xcode Command Line Tools
+        run: |
+          xcode-select --install || true
+          sudo xcodebuild -license accept
+
+      - name: Install clang for SMJobBless installer
+        run: |
+          # Ensure clang is available
+          clang --version
+
+      - name: Create ICNS icon
+        run: |
+          echo "Creating ICNS icon..."
+          
+          # Create iconset directory
+          ICONSET_DIR="assets/icon.iconset"
+          mkdir -p "$ICONSET_DIR"
+          
+          # Create different icon sizes
+          sips -z 16 16     assets/icon.png --out "$ICONSET_DIR/icon_16x16.png"
+          sips -z 32 32     assets/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png"
+          sips -z 32 32     assets/icon.png --out "$ICONSET_DIR/icon_32x32.png"
+          sips -z 64 64     assets/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png"
+          sips -z 128 128   assets/icon.png --out "$ICONSET_DIR/icon_128x128.png"
+          sips -z 256 256   assets/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png"
+          sips -z 256 256   assets/icon.png --out "$ICONSET_DIR/icon_256x256.png"
+          sips -z 512 512   assets/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png"
+          sips -z 512 512   assets/icon.png --out "$ICONSET_DIR/icon_512x512.png"
+          sips -z 1024 1024 assets/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png"
+          
+          # Convert iconset to ICNS
+          iconutil -c icns "$ICONSET_DIR" -o "assets/icon.icns"
+          
+          # Clean up iconset directory
+          rm -rf "$ICONSET_DIR"
+          
+          echo "ICNS icon created successfully"
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build helper binary
+        run: |
+          echo "Building helper binary for ${{ matrix.target }}..."
+          cargo build --release --bin helper --target ${{ matrix.target }}
+          if [ $? -ne 0 ]; then
+            echo "Failed to build helper binary"
+            exit 1
+          fi
+
+      - name: Build main application
+        run: |
+          echo "Building main application for ${{ matrix.target }}..."
+          cargo build --release --target ${{ matrix.target }}
+          if [ $? -ne 0 ]; then
+            echo "Failed to build main application"
+            exit 1
+          fi
+
+      - name: Build SMJobBless installer
+        run: |
+          echo "Building SMJobBless installer..."
+          make clean
+          make
+          if [ $? -ne 0 ]; then
+            echo "Failed to build smjobbless_installer"
+            exit 1
+          fi
+
+      - name: Create app bundle
+        run: |
+          echo "Creating app bundle for ${{ matrix.target }}..."
+          cargo bundle --release --target ${{ matrix.target }}
+          if [ $? -ne 0 ]; then
+            echo "Failed to create app bundle"
+            exit 1
+          fi
+
+      - name: Setup app bundle structure
+        run: |
+          echo "Setting up app bundle structure..."
+          
+          # Define paths
+          APP_BUNDLE="target/${{ matrix.target }}/release/bundle/osx/Archify.app"
+          LAUNCHSERVICES_DIR="$APP_BUNDLE/Contents/Library/LaunchServices"
+          HELPER_SOURCE="target/${{ matrix.target }}/release/helper"
+          HELPER_PLIST_SOURCE="helper/com.archify.helper.plist"
+          INSTALLER_SOURCE="smjobbless_installer"
+          
+          # Check if files exist
+          if [ ! -f "$HELPER_SOURCE" ]; then
+            echo "Helper binary not found at $HELPER_SOURCE"
+            exit 1
+          fi
+          
+          if [ ! -d "$APP_BUNDLE" ]; then
+            echo "App bundle not found at $APP_BUNDLE"
+            exit 1
+          fi
+          
+          if [ ! -f "$INSTALLER_SOURCE" ]; then
+            echo "smjobbless_installer not found"
+            exit 1
+          fi
+          
+          # Create LaunchServices directory
+          mkdir -p "$LAUNCHSERVICES_DIR"
+          
+          # Copy helper binary, plist, and installer
+          cp "$HELPER_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper"
+          cp "$HELPER_PLIST_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper.plist"
+          cp "$INSTALLER_SOURCE" "$LAUNCHSERVICES_DIR/smjobbless_installer"
+          
+          # Set executable permissions
+          chmod +x "$LAUNCHSERVICES_DIR/com.archify.helper"
+          chmod +x "$LAUNCHSERVICES_DIR/smjobbless_installer"
+          
+          echo "App bundle structure setup complete"
+
+      - name: Create universal binary (Intel only)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          echo "Creating universal binary..."
+          
+          # Create a copy of the x86_64 bundle for universal
+          cp -r "target/x86_64-apple-darwin/release/bundle/osx/Archify.app" "target/universal/"
+          
+          # Copy arm64 binary into the universal bundle
+          cp "target/aarch64-apple-darwin/release/archify-rust" "target/universal/Archify.app/Contents/MacOS/archify-rust-arm64"
+          
+          # Create universal binary using lipo
+          lipo -create \
+            "target/x86_64-apple-darwin/release/archify-rust" \
+            "target/aarch64-apple-darwin/release/archify-rust" \
+            -output "target/universal/Archify.app/Contents/MacOS/archify-rust"
+          
+          echo "Universal binary created"
+
+      - name: Create DMG for x86_64
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          echo "Creating DMG for x86_64..."
+          
+          # Install create-dmg
+          brew install create-dmg
+          
+          # Create DMG
+          create-dmg \
+            --volname "Archify" \
+            --volicon "assets/icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Archify.app" 175 120 \
+            --hide-extension "Archify.app" \
+            --app-drop-link 425 120 \
+            "target/Archify-x86_64.dmg" \
+            "target/x86_64-apple-darwin/release/bundle/osx/"
+
+      - name: Create DMG for arm64
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          echo "Creating DMG for arm64..."
+          
+          # Install create-dmg
+          brew install create-dmg
+          
+          # Create DMG
+          create-dmg \
+            --volname "Archify" \
+            --volicon "assets/icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Archify.app" 175 120 \
+            --hide-extension "Archify.app" \
+            --app-drop-link 425 120 \
+            "target/Archify-arm64.dmg" \
+            "target/aarch64-apple-darwin/release/bundle/osx/"
+
+      - name: Create universal DMG
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          echo "Creating universal DMG..."
+          
+          # Create universal DMG
+          create-dmg \
+            --volname "Archify" \
+            --volicon "assets/icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Archify.app" 175 120 \
+            --hide-extension "Archify.app" \
+            --app-drop-link 425 120 \
+            "target/Archify-universal.dmg" \
+            "target/universal/"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-${{ matrix.suffix }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/osx/Archify.app
+            target/Archify-${{ matrix.suffix }}.dmg
+          retention-days: 30
+
+      - name: Upload universal artifacts
+        if: matrix.target == 'x86_64-apple-darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-universal
+          path: |
+            target/universal/Archify.app
+            target/Archify-universal.dmg
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Archify ${{ steps.version.outputs.version }}
+          body: |
+            ## Archify ${{ steps.version.outputs.version }}
+            
+            A powerful macOS application for optimizing universal binaries by removing unnecessary architectures.
+            
+            ### Downloads
+            
+            - **Universal Binary** (Recommended): Works on both Intel and Apple Silicon Macs
+            - **Intel (x86_64)**: For Intel Macs only
+            - **Apple Silicon (arm64)**: For Apple Silicon Macs only
+            
+            ### Installation
+            
+            1. Download the appropriate DMG file for your Mac
+            2. Open the DMG and drag Archify to your Applications folder
+            3. Launch Archify from Applications
+            
+            ### Features
+            
+            - Scan and identify universal binaries
+            - Remove unnecessary architectures to save disk space
+            - Support for both user and system applications
+            - Privileged helper for system apps requiring elevated permissions
+            - Beautiful native macOS interface
+            
+            ### System Requirements
+            
+            - macOS 10.15 (Catalina) or later
+            - Intel Mac or Apple Silicon Mac
+            
+            ### License
+            
+            This project is licensed under the GNU General Public License v3.0.
+          files: |
+            artifacts/archify-universal/Archify-universal.dmg
+            artifacts/archify-x86_64/Archify-x86_64.dmg
+            artifacts/archify-arm64/Archify-arm64.dmg
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
