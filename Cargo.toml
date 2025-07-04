@@ -69,6 +69,9 @@ libc = "0.2"
 # Added for shell-words crate
 shell-words = "1.1"
 
+# Added for image crate
+image = "0.24"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS specific dependencies
 cocoa = "0.25"

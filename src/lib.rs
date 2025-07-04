@@ -39,8 +39,7 @@ mod tests {
             match result {
                 Ok(size) => {
                     println!("Unneeded architecture size for lipo: {} bytes", size);
-                    // Should be >= 0
-                    assert!(size >= 0);
+                    // Size calculated successfully
                 }
                 Err(e) => {
                     println!("Error calculating unneeded arch size: {}", e);

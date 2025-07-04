@@ -147,14 +147,9 @@ impl PrivilegedHelper {
             };
         }
 
-        // Check if the helper service is running
-        let is_running = match std::process::Command::new("launchctl")
-            .args(&["list", "com.archify.helper"])
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        };
+        // Check if the helper service is running by checking for the socket file
+        let socket_path = "/var/run/com.archify.helper.sock";
+        let is_running = Path::new(socket_path).exists();
 
         // Try to get version info
         let version = match std::process::Command::new("/Library/PrivilegedHelperTools/com.archify.helper")
