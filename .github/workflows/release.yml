@@ -171,25 +171,6 @@ jobs:
           
           echo "App bundle structure setup complete"
 
-      - name: Create universal binary (Intel only)
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: |
-          echo "Creating universal binary..."
-          
-          # Create a copy of the x86_64 bundle for universal
-          cp -r "target/x86_64-apple-darwin/release/bundle/osx/Archify.app" "target/universal/"
-          
-          # Copy arm64 binary into the universal bundle
-          cp "target/aarch64-apple-darwin/release/archify-rust" "target/universal/Archify.app/Contents/MacOS/archify-rust-arm64"
-          
-          # Create universal binary using lipo
-          lipo -create \
-            "target/x86_64-apple-darwin/release/archify-rust" \
-            "target/aarch64-apple-darwin/release/archify-rust" \
-            -output "target/universal/Archify.app/Contents/MacOS/archify-rust"
-          
-          echo "Universal binary created"
-
       - name: Create DMG for x86_64
         if: matrix.target == 'x86_64-apple-darwin'
         run: |
@@ -232,10 +213,111 @@ jobs:
             "target/Archify-arm64.dmg" \
             "target/aarch64-apple-darwin/release/bundle/osx/"
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-${{ matrix.suffix }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/osx/Archify.app
+            target/Archify-${{ matrix.suffix }}.dmg
+          retention-days: 30
+
+      - name: Upload binaries for universal
+        uses: actions/upload-artifact@v4
+        with:
+          name: archify-binary-${{ matrix.suffix }}
+          path: |
+            target/${{ matrix.target }}/release/archify-rust
+            target/${{ matrix.target }}/release/helper
+          retention-days: 30
+
+  universal:
+    name: Create Universal Binary and DMG
+    needs: build
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create ICNS icon
+        run: |
+          echo "Creating ICNS icon..."
+          
+          # Create iconset directory
+          ICONSET_DIR="assets/icon.iconset"
+          mkdir -p "$ICONSET_DIR"
+          
+          # Create different icon sizes
+          sips -z 16 16     assets/icon.png --out "$ICONSET_DIR/icon_16x16.png"
+          sips -z 32 32     assets/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png"
+          sips -z 32 32     assets/icon.png --out "$ICONSET_DIR/icon_32x32.png"
+          sips -z 64 64     assets/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png"
+          sips -z 128 128   assets/icon.png --out "$ICONSET_DIR/icon_128x128.png"
+          sips -z 256 256   assets/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png"
+          sips -z 256 256   assets/icon.png --out "$ICONSET_DIR/icon_256x256.png"
+          sips -z 512 512   assets/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png"
+          sips -z 512 512   assets/icon.png --out "$ICONSET_DIR/icon_512x512.png"
+          sips -z 1024 1024 assets/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png"
+          
+          # Convert iconset to ICNS
+          iconutil -c icns "$ICONSET_DIR" -o "assets/icon.icns"
+          
+          # Clean up iconset directory
+          rm -rf "$ICONSET_DIR"
+          
+          echo "ICNS icon created successfully"
+
+      - name: Download x86_64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: archify-binary-x86_64
+          path: x86_64-binaries
+
+      - name: Download arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: archify-binary-arm64
+          path: arm64-binaries
+
+      - name: Download x86_64 app bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: archify-x86_64
+          path: x86_64-bundle
+
+      - name: Create universal binary
+        run: |
+          echo "Creating universal binary..."
+          
+          # Create universal directory
+          mkdir -p target/universal/Archify.app/Contents/MacOS
+          mkdir -p target/universal/Archify.app/Contents/Library/LaunchServices
+          
+          # Copy x86_64 app bundle structure
+          cp -r x86_64-bundle/Archify.app/* target/universal/Archify.app/
+          
+          # Create universal binary using lipo
+          lipo -create \
+            "x86_64-binaries/archify-rust" \
+            "arm64-binaries/archify-rust" \
+            -output "target/universal/Archify.app/Contents/MacOS/archify-rust"
+          
+          # Create universal helper binary
+          lipo -create \
+            "x86_64-binaries/helper" \
+            "arm64-binaries/helper" \
+            -output "target/universal/Archify.app/Contents/Library/LaunchServices/com.archify.helper"
+          
+          echo "Universal binary created"
+
       - name: Create universal DMG
-        if: matrix.target == 'x86_64-apple-darwin'
         run: |
           echo "Creating universal DMG..."
+          
+          # Install create-dmg
+          brew install create-dmg
           
           # Create universal DMG
           create-dmg \
@@ -250,17 +332,7 @@ jobs:
             "target/Archify-universal.dmg" \
             "target/universal/"
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: archify-${{ matrix.suffix }}
-          path: |
-            target/${{ matrix.target }}/release/bundle/osx/Archify.app
-            target/Archify-${{ matrix.suffix }}.dmg
-          retention-days: 30
-
       - name: Upload universal artifacts
-        if: matrix.target == 'x86_64-apple-darwin'
         uses: actions/upload-artifact@v4
         with:
           name: archify-universal
@@ -271,7 +343,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build, universal]
     runs-on: macos-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     
@@ -292,6 +364,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: archify-*
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
