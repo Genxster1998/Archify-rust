@@ -308,8 +308,8 @@ jobs:
           APP_BUNDLE_PATH=""
           if [ -d "x86_64-bundle/Archify.app" ]; then
             APP_BUNDLE_PATH="x86_64-bundle/Archify.app"
-          elif [ -d "x86_64-bundle/target/x86_64-apple-darwin/release/bundle/osx/Archify.app" ]; then
-            APP_BUNDLE_PATH="x86_64-bundle/target/x86_64-apple-darwin/release/bundle/osx/Archify.app"
+          elif [ -d "x86_64-bundle/x86_64-apple-darwin/release/bundle/osx/Archify.app" ]; then
+            APP_BUNDLE_PATH="x86_64-bundle/x86_64-apple-darwin/release/bundle/osx/Archify.app"
           else
             echo "Error: Could not find Archify.app in x86_64-bundle"
             find x86_64-bundle/ -name "*.app" -type d
