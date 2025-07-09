@@ -619,79 +619,87 @@ impl ArchifyApp {
     }
 
     fn render_applications_tab(&mut self, ui: &mut egui::Ui) {
+        
+        use egui::RichText;
+        use egui::Color32;
+        // Main content (everything except status bar)
+        egui::TopBottomPanel::bottom("status_bar_panel").show_inside(ui, |ui| {
+            let selected_apps: Vec<_> = self.apps.iter().filter(|a| self.selected_apps.contains(&a.path)).collect();
+            let selected_count = selected_apps.len();
+            let total_size: u64 = selected_apps.iter().map(|a| a.total_size).sum();
+            let savable_size: u64 = selected_apps.iter().map(|a| a.savable_size).sum();
+            ui.add_space(2.0);
+            //ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Selected:").size(13.0));
+                ui.label(RichText::new(format!("{} app(s)", selected_count)).size(13.0).color(Color32::from_rgb(52, 152, 219)));
+                ui.separator();
+                ui.label(RichText::new("Total Size:").size(13.0));
+                ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(total_size, 2)).size(13.0).color(Color32::YELLOW));
+                ui.separator();
+                ui.label(RichText::new("Savable:").size(13.0));
+                ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(savable_size, 2)).size(13.0).color(Color32::GREEN));
+            });
+            ui.add_space(2.0);
+        });
         ui.horizontal(|ui| {
             if ui.button("Scan Applications").clicked() && !self.is_scanning {
                 self.scan_applications();
             }
-            
             if ui.button("Process Selected").clicked() && !self.is_processing && !self.is_scanning {
                 self.process_selected_apps();
             }
-            
             if self.is_scanning {
                 ui.label("Scanning...");
             }
-            
             if self.is_processing {
                 ui.label("Processing...");
             }
         });
-        
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_only_universal, "Show only universal binaries");
             if self.show_only_universal {
                 ui.label("(Filtering universal binaries only)");
             }
         });
-        
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_only_appstore, "Show only App Store apps");
             if self.show_only_appstore {
                 ui.label("(Filtering App Store apps only)");
             }
         });
-        
         ui.separator();
-        
         // Select All checkbox
         let filtered_apps: Vec<_> = self.apps.iter().filter(|a| {
             let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
-            let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
+            let appstore_filter = !self.show_only_appstore || a.app_source == crate::types::AppSource::AppStore;
             universal_filter && appstore_filter
         }).collect();
-        
         if !filtered_apps.is_empty() {
             let all_selected = filtered_apps.iter().all(|a| self.selected_apps.contains(&a.path));
             let mut select_all = all_selected;
-            
             if ui.checkbox(&mut select_all, "Select All").clicked() {
                 if select_all {
-                    // Select all filtered apps
                     for app_info in filtered_apps {
                         if !self.selected_apps.contains(&app_info.path) {
                             self.selected_apps.push(app_info.path.clone());
                         }
                     }
                 } else {
-                    // Deselect all filtered apps
                     self.selected_apps.retain(|p| {
                         !filtered_apps.iter().any(|a| &a.path == p)
                     });
                 }
             }
         }
-        
-        // Show scanning progress if scanning
         if self.is_scanning {
             ui.label(format!("Scanning applications... {}", self.current_scanning_app));
             ui.add(egui::ProgressBar::new(self.progress).show_percentage());
         }
-        
-        // Applications list
         egui::ScrollArea::vertical().show(ui, |ui| {
             for app_info in self.apps.iter().filter(|a| {
                 let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
-                let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
+                let appstore_filter = !self.show_only_appstore || a.app_source == crate::types::AppSource::AppStore;
                 universal_filter && appstore_filter
             }) {
                 let mut selected = self.selected_apps.contains(&app_info.path);
@@ -706,7 +714,6 @@ impl ArchifyApp {
                 ui.label(&format!("Source: {}", app_info.app_source));
                 ui.label(&format!("Size: {}", FileOperations::human_readable_size(app_info.total_size, 2)));
                 ui.label(&format!("Estimated Savable: {}", FileOperations::human_readable_size(app_info.savable_size, 2)));
-                // Show actual saved space if available (after processing)
                 if let Some(saved) = crate::types::ProcessingState::default().saved_spaces.get(&app_info.name) {
                     ui.label(&format!("Actual Saved: {}", FileOperations::human_readable_size(*saved, 2)));
                 }
@@ -760,7 +767,9 @@ impl ArchifyApp {
             self.custom_scan_dirs.remove(i);
         }
         if ui.button("Add Directory...").clicked() {
-            if let Some(dir) = FileDialog::new().pick_folder() {
+            if let Some(dir) = FileDialog::new()
+                .set_directory(std::env::current_dir().unwrap_or_default())
+                .pick_folder() {
                 if !self.custom_scan_dirs.contains(&dir) {
                     self.custom_scan_dirs.push(dir);
                 }
