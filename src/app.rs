@@ -1,3 +1,21 @@
+/*
+ * Archify Rust - App Logic
+ * Copyright (C) 2025 Genxster1998
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 use crate::file_operations::FileOperations;
 use crate::types::{AppInfo, LogLevel, LogMessage, ProcessingConfig, BatchProcessingConfig, AppSource};
 use eframe::egui;
@@ -556,10 +574,29 @@ impl ArchifyApp {
         self.helper_status = PrivilegedHelper::get_helper_status();
         }
 
-    pub fn handle_helper_logs(&mut self) {
+    pub fn handle_helper_logs(&mut self, ctx: &egui::Context) {
         if let Some(ref mut rx) = self.helper_log_receiver {
             while let Ok(log) = rx.try_recv() {
-                self.logs.push(log);
+                self.logs.push(log.clone());
+                // Check for helper thinning success log
+                if log.message.contains("Successfully thinned") && log.message.contains(": OK") {
+                    // Show success dialog for helper thinning
+                    self.show_success_dialog = true;
+                    self.was_processing = false;
+                    self.processing_start_time = None;
+                    let msg = if let Some(start) = log.message.find('/') {
+                        if let Some(end) = log.message.find(": OK") {
+                            let app_path = &log.message[start..end];
+                            format!("✅ Successfully thinned {}!", app_path)
+                        } else {
+                            "✅ Helper-based thinning completed successfully!".to_string()
+                        }
+                    } else {
+                        "✅ Helper-based thinning completed successfully!".to_string()
+                    };
+                    self.success_message = msg;
+                    ctx.request_repaint();
+                }
             }
             
             // Check if helper processing is complete
@@ -1253,7 +1290,7 @@ impl ArchifyApp {
 impl eframe::App for ArchifyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_scanning_messages();
-        self.handle_helper_logs();
+        self.handle_helper_logs(ctx);
         self.handle_processing_logs();
         
         egui::CentralPanel::default().show(ctx, |ui| {

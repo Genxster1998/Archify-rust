@@ -1,3 +1,24 @@
+<!-- Centered App Icon -->
+<p align="center">
+  <img src="assets/icon.png" alt="Archify Rust Icon" width="120" height="120" />
+</p>
+
+<!-- Centered Badges -->
+<p align="center">
+  <a href="https://github.com/Genxster1998/archify-rust/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/Genxster1998/archify-rust/ci.yml?branch=main" alt="Build Status" />
+  </a>
+  <a href="https://github.com/Genxster1998/archify-rust/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/Genxster1998/archify-rust" alt="License" />
+  </a>
+  <a href="https://github.com/Genxster1998/archify-rust/issues">
+    <img src="https://img.shields.io/github/issues/Genxster1998/archify-rust" alt="Issues" />
+  </a>
+  <a href="https://github.com/Genxster1998/archify-rust/stargazers">
+    <img src="https://img.shields.io/github/stars/Genxster1998/archify-rust" alt="Stars" />
+  </a>
+</p>
+
 # Archify Rust
 
 A modern Rust implementation of Archify for removing ARM64e/ARM64 code from macOS universal binaries. This tool helps reduce disk space usage by removing unnecessary architectures from applications.

@@ -181,6 +181,7 @@ jobs:
           
           # Install create-dmg
           brew install create-dmg
+          rm -f target/Archify-x86_64.dmg
           
           # Create DMG
           create-dmg \
@@ -202,6 +203,7 @@ jobs:
           
           # Install create-dmg
           brew install create-dmg
+          rm -f target/Archify-arm64.dmg
           
           # Create DMG
           create-dmg \
@@ -342,11 +344,8 @@ jobs:
       - name: Create universal DMG
         run: |
           echo "Creating universal DMG..."
-          
-          # Install create-dmg
           brew install create-dmg
-          
-          # Create universal DMG
+          rm -f target/Archify-universal.dmg
           create-dmg \
             --volname "Archify" \
             --volicon "assets/icon.icns" \
