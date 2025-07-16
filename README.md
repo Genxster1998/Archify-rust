@@ -103,29 +103,6 @@ For advanced users, you can also use the CLI mode:
 sudo ./target/release/archify-rust --batch-elevated /path/to/app1.app /path/to/app2.app
 ```
 
-## Architecture
-
-### Main Application (`src/main.rs`)
-- GUI application built with `egui`
-- Handles user interface and coordination
-- Manages scanning and processing workflows
-
-### Helper Binary (`src/bin/helper.rs`)
-- Rust binary for privileged operations
-- Installed as a system service via launchd
-- Handles actual thinning operations with root privileges
-- Supports signing with `codesign` or `ldid`
-
-### File Operations (`src/file_operations.rs`)
-- Core scanning and processing logic
-- Parallel processing implementation
-- App source detection and filtering
-
-### Privileged Helper (`src/privileged_helper.rs`)
-- Manages helper installation/uninstallation
-- GUI prompts for administrator privileges
-- Service status monitoring
-
 ## Security
 
 ### Privileged Helper
