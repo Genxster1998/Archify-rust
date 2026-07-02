@@ -1,6 +1,6 @@
 use crate::file_operations::FileOperations;
 use crate::types::{AppInfo, LogLevel, LogMessage, ProcessingConfig, BatchProcessingConfig, AppSource, UserSettings};
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::runtime::Runtime;
@@ -681,25 +681,25 @@ impl ArchifyApp {
                         
                         if failed_apps.is_empty() {
                             // No specific app failures, just general errors
-                            self.success_message = "⚠️ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string();
+                            self.success_message = "⚠ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string();
                         } else {
                             // Build detailed failure message
-                            let mut message = format!("⚠️ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len());
+                            let mut message = format!("⚠ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len());
                             
                             for (app_name, reason) in &failed_apps {
                                 message.push_str(&format!("• {}: {}\n", app_name, reason));
                             }
                             
                             if total_saved > 0 {
-                                message.push_str(&format!("\n✅ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
+                                message.push_str(&format!("\n✓ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
                             }
                             
-                            message.push_str("\n\n💡 Tip: Check the Logs tab for detailed information about each failure.");
+                            message.push_str("\n\nⓘ Tip: Check the Logs tab for detailed information about each failure.");
                             
                             self.success_message = message;
                         }
                     } else if timeout_elapsed && !has_completion_message {
-                        self.success_message = "✅ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
+                        self.success_message = "✓ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
                     } else {
                         // Calculate total saved space from logs
                         let mut total_saved = 0u64;
@@ -717,11 +717,11 @@ impl ArchifyApp {
                         
                         if total_saved > 0 {
                             self.success_message = format!(
-                                "✅ Binary thinning completed successfully!\n\nTotal space saved: {}",
+                                "✓ Binary thinning completed successfully!\n\nTotal space saved: {}",
                                 FileOperations::human_readable_size(total_saved, 2)
                             );
                         } else {
-                            self.success_message = "✅ Binary thinning completed successfully!".to_string();
+                            self.success_message = "✓ Binary thinning completed successfully!".to_string();
                         }
                     }
                 }
@@ -766,25 +766,25 @@ impl ArchifyApp {
                         
                         if failed_apps.is_empty() {
                             // No specific app failures, just general errors
-                            self.success_message = "⚠️ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string();
+                            self.success_message = "⚠ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string();
                         } else {
                             // Build detailed failure message
-                            let mut message = format!("⚠️ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len());
+                            let mut message = format!("⚠ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len());
                             
                             for (app_name, reason) in &failed_apps {
                                 message.push_str(&format!("• {}: {}\n", app_name, reason));
                             }
                             
                             if total_saved > 0 {
-                                message.push_str(&format!("\n✅ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
+                                message.push_str(&format!("\n✓ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
                             }
                             
-                            message.push_str("\n\n💡 Tip: Check the Logs tab for detailed information about each failure.");
+                            message.push_str("\n\nⓘ Tip: Check the Logs tab for detailed information about each failure.");
                             
                             self.success_message = message;
                         }
                     } else if timeout_elapsed && !has_completion_message {
-                        self.success_message = "✅ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
+                        self.success_message = "✓ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
                     } else {
                         // Calculate total saved space from logs
                         let mut total_saved = 0u64;
@@ -802,11 +802,11 @@ impl ArchifyApp {
                         
                         if total_saved > 0 {
                             self.success_message = format!(
-                                "✅ Binary thinning completed successfully!\n\nTotal space saved: {}",
+                                "✓ Binary thinning completed successfully!\n\nTotal space saved: {}",
                                 FileOperations::human_readable_size(total_saved, 2)
                             );
                         } else {
-                            self.success_message = "✅ Binary thinning completed successfully!".to_string();
+                            self.success_message = "✓ Binary thinning completed successfully!".to_string();
                         }
                     }
                 }
@@ -1000,17 +1000,29 @@ impl ArchifyApp {
         // Display helper status
         ui.label("Helper Status:");
         if self.helper_status.is_installed {
-            ui.colored_label(egui::Color32::GREEN, "✓ Installed");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("✓").size(15.0).color(egui::Color32::GREEN).strong());
+                ui.label("Installed");
+            });
             if self.helper_status.is_running {
-                ui.colored_label(egui::Color32::GREEN, "✓ Running");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("✓").size(15.0).color(egui::Color32::GREEN).strong());
+                    ui.label("Running");
+                });
             } else {
-                ui.colored_label(egui::Color32::YELLOW, "⚠ Not Running");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(15.0).color(egui::Color32::YELLOW).strong());
+                    ui.label("Not Running");
+                });
             }
             if let Some(version) = &self.helper_status.version {
                 ui.label(format!("Version: {}", version));
             }
         } else {
-            ui.colored_label(egui::Color32::RED, "✗ Not Installed");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("✗").size(15.0).color(egui::Color32::RED).strong());
+                ui.label("Not Installed");
+            });
             if let Some(error) = &self.helper_status.error {
                 ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
             }
@@ -1043,7 +1055,10 @@ impl ArchifyApp {
                     ui.label("The privileged helper is required to thin applications that require elevated permissions.");
                     ui.label("This will install a system service that runs with root privileges.");
                     ui.separator();
-                    ui.label("⚠️ Security Note:");
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("⚠").size(16.0).color(egui::Color32::YELLOW).strong());
+                        ui.label(RichText::new("Security Note:").strong());
+                    });
                     ui.label("• The helper will be installed in /Library/PrivilegedHelperTools/");
                     ui.label("• It will run as a system service with root privileges");
                     ui.label("• You will be prompted for your administrator password");
@@ -1278,7 +1293,10 @@ impl ArchifyApp {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.heading("⚠️ Elevated Permissions Required");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(22.0).color(egui::Color32::YELLOW).strong());
+                    ui.heading("Elevated Permissions Required");
+                });
                 
                 ui.label("The following apps require elevated permissions to modify:");
                 ui.separator();
@@ -1304,7 +1322,10 @@ impl ArchifyApp {
                 }
                 
                 // Warning about elevated processing
-                ui.colored_label(egui::Color32::YELLOW, "⚠️ Important Warnings:");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(16.0).color(egui::Color32::YELLOW).strong());
+                    ui.label(RichText::new("Important Warnings:").color(egui::Color32::YELLOW).strong());
+                });
                 ui.label("• Elevated processing may modify system files and App Store apps");
                 ui.label("• Some apps may become unusable if modified incorrectly");
                 ui.label("• Always backup important data before proceeding");
@@ -1315,11 +1336,11 @@ impl ArchifyApp {
                 
                 // Action buttons
                 ui.horizontal(|ui| {
-                    if ui.button("🔄 Process with Elevated Permissions").clicked() {
+                    if ui.button(RichText::new("↻ Process with Elevated Permissions").strong()).clicked() {
                         self.confirm_elevated_processing();
                     }
                     
-                    if ui.button("❌ Cancel").clicked() {
+                    if ui.button(RichText::new("✗ Cancel").strong()).clicked() {
                         self.cancel_elevated_processing();
                     }
                 });
@@ -1333,17 +1354,20 @@ impl ArchifyApp {
     }
 
     fn render_success_dialog(&mut self, ctx: &egui::Context) {
-        let (title, icon) = if self.success_message.contains("⚠️") {
-            ("Processing Complete", "⚠️")
+        let (title, icon, icon_color) = if self.success_message.contains("⚠") {
+            ("Processing Complete", "⚠", egui::Color32::YELLOW)
         } else {
-            ("Processing Complete", "🎉")
+            ("Processing Complete", "★", egui::Color32::from_rgb(241, 196, 15))
         };
         
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.heading(format!("{} {}", icon, title));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon).size(22.0).color(icon_color).strong());
+                    ui.heading(title);
+                });
                 
                 // Use scrollable area for long messages
                 egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
