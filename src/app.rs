@@ -56,6 +56,10 @@ pub struct ArchifyApp {
     pub success_message: String,
     pub was_processing: bool,
     pub processing_start_time: Option<std::time::Instant>,
+    // Manual scanning state
+    pub manual_binaries: Vec<crate::types::BinaryInfo>,
+    pub manual_selected_binaries: std::collections::HashSet<PathBuf>,
+    pub manual_is_scanning: bool,
     // Icon texture cache for About tab
     pub about_icon_texture: Option<egui::TextureHandle>,
     pub about_gpl_texture: Option<egui::TextureHandle>,
@@ -195,6 +199,10 @@ impl ArchifyApp {
             success_message: String::new(),
             was_processing: false,
             processing_start_time: None,
+            // Manual scanning state
+            manual_binaries: Vec::new(),
+            manual_selected_binaries: std::collections::HashSet::new(),
+            manual_is_scanning: false,
             // Icon texture cache for About tab
             about_icon_texture: None,
             about_gpl_texture: None,
@@ -249,6 +257,36 @@ impl ArchifyApp {
         });
     }
 
+    pub fn scan_manual_binaries(&mut self) {
+        if self.is_scanning || self.manual_is_scanning {
+            return;
+        }
+
+        self.is_scanning = true;
+        self.manual_is_scanning = true;
+        self.progress = 0.0;
+        self.progress_phase = "Scanning folder for fat binaries...".to_string();
+        self.manual_binaries.clear();
+        self.manual_selected_binaries.clear();
+
+        let (tx, rx) = mpsc::channel(100);
+        self.scan_sender = Some(tx.clone());
+        self.scan_receiver = Some(rx);
+
+        let paths = self.manual_selected_apps.clone();
+        let runtime = RUNTIME.get().expect("Runtime not initialized");
+
+        runtime.spawn(async move {
+            if let Err(e) = FileOperations::scan_binaries_async(paths, tx.clone()).await {
+                let _ = tx.send(LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Error,
+                    message: format!("Failed to scan folder: {}", e),
+                }).await;
+            }
+        });
+    }
+
     pub fn handle_scanning_messages(&mut self) {
         if !self.is_scanning && !self.is_processing {
             return;
@@ -278,6 +316,22 @@ impl ArchifyApp {
                     if let Some(apps_json) = log.message.strip_prefix("APPS_LIST:") {
                         if let Ok(apps) = serde_json::from_str::<Vec<AppInfo>>(apps_json) {
                             self.apps = apps;
+                            self.is_scanning = false;
+                            self.scan_sender = None;
+                            self.scan_receiver = None;
+                            self.progress = 1.0;
+                            self.progress_phase.clear();
+                            return;
+                        }
+                    }
+                }
+                // Check if this is a special binaries list message
+                if log.message.starts_with("BINARIES_LIST:") {
+                    if let Some(binaries_json) = log.message.strip_prefix("BINARIES_LIST:") {
+                        if let Ok(binaries) = serde_json::from_str::<Vec<crate::types::BinaryInfo>>(binaries_json) {
+                            self.manual_binaries = binaries;
+                            self.manual_selected_binaries = self.manual_binaries.iter().map(|b| b.path.clone()).collect();
+                            self.manual_is_scanning = false;
                             self.is_scanning = false;
                             self.scan_sender = None;
                             self.scan_receiver = None;
@@ -467,9 +521,14 @@ impl ArchifyApp {
         self.elevated_confirmed = false;
     }
 
-    fn process_manual_selected_apps(&mut self) {
-        if self.manual_selected_apps.is_empty() {
-            self.add_log(LogLevel::Warning, "No applications selected for processing".to_string());
+    fn process_manual_binaries(&mut self) {
+        let selected_binaries: Vec<_> = self.manual_binaries.iter()
+            .filter(|b| self.manual_selected_binaries.contains(&b.path))
+            .map(|b| b.path.clone())
+            .collect();
+
+        if selected_binaries.is_empty() {
+            self.add_log(LogLevel::Warning, "No binaries selected for processing".to_string());
             return;
         }
 
@@ -481,13 +540,13 @@ impl ArchifyApp {
         // Update batch config with current processing config
         self.batch_config.processing_config = self.processing_config.clone();
 
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
+        self.processing_log_receiver = Some(rx);
         let config = self.batch_config.clone();
-        let selected_apps = self.manual_selected_apps.clone();
 
         let runtime = RUNTIME.get().expect("Runtime not initialized");
         runtime.spawn(async move {
-            if let Err(e) = FileOperations::batch_process_apps(selected_apps, &config, tx.clone()).await {
+            if let Err(e) = FileOperations::batch_process_binaries(selected_binaries, &config, tx.clone()).await {
                 let _ = tx.send(LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Error,
@@ -496,13 +555,8 @@ impl ArchifyApp {
             }
         });
 
-        // Handle log messages
-        while let Ok(log) = rx.try_recv() {
-            self.logs.push(log);
-        }
-
         self.is_processing = false;
-        self.add_log(LogLevel::Info, "Manual thinning completed".to_string());
+        self.add_log(LogLevel::Info, "Manual binary processing started".to_string());
     }
 
     fn add_log(&mut self, level: LogLevel, message: String) {
@@ -1124,6 +1178,8 @@ impl ArchifyApp {
                         .into_iter()
                         .filter(|p| p.extension().map_or(false, |ext| ext == "app"))
                         .collect();
+                    self.manual_binaries.clear();
+                    self.manual_selected_binaries.clear();
                 }
             }
 
@@ -1132,17 +1188,102 @@ impl ArchifyApp {
                     .set_directory(std::env::current_dir().unwrap_or_default())
                     .pick_folders() {
                     self.manual_selected_apps = paths;
+                    self.manual_binaries.clear();
+                    self.manual_selected_binaries.clear();
                 }
             }
         });
 
         if !self.manual_selected_apps.is_empty() {
-            ui.label("Selected paths:");
-            for path in &self.manual_selected_apps {
-                ui.label(format!("- {}", path.display()));
-            }
-            if ui.button("Process Selected Items").clicked() && !self.is_processing {
-                self.process_manual_selected_apps();
+            ui.group(|ui| {
+                ui.label("Selected paths:");
+                for path in &self.manual_selected_apps {
+                    ui.label(format!("• {}", path.display()));
+                }
+            });
+
+            ui.add_space(5.0);
+
+            ui.horizontal(|ui| {
+                if ui.button("Scan for Universal/Fat Binaries").clicked() && !self.is_scanning {
+                    self.scan_manual_binaries();
+                }
+
+                if self.is_scanning && self.manual_is_scanning {
+                    ui.spinner();
+                    ui.label(&self.progress_phase);
+                }
+            });
+
+            if !self.manual_binaries.is_empty() {
+                ui.separator();
+                ui.heading("Universal / Fat Binaries Found");
+                
+                // Status Panel for selected binaries
+                let selected_count = self.manual_selected_binaries.len();
+                let total_size: u64 = self.manual_binaries.iter()
+                    .filter(|b| self.manual_selected_binaries.contains(&b.path))
+                    .map(|b| b.size)
+                    .sum();
+                let savable_size: u64 = self.manual_binaries.iter()
+                    .filter(|b| self.manual_selected_binaries.contains(&b.path))
+                    .map(|b| b.savable_size)
+                    .sum();
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Selected:").size(13.0));
+                    ui.label(RichText::new(format!("{} binary/binaries", selected_count)).size(13.0).color(egui::Color32::from_rgb(52, 152, 219)));
+                    ui.separator();
+                    ui.label(RichText::new("Total Size:").size(13.0));
+                    ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(total_size, 2)).size(13.0).color(egui::Color32::YELLOW));
+                    ui.separator();
+                    ui.label(RichText::new("Savable:").size(13.0));
+                    ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(savable_size, 2)).size(13.0).color(egui::Color32::GREEN));
+                });
+
+                ui.add_space(5.0);
+
+                if ui.button(RichText::new("Process Selected Binaries").strong()).clicked() && !self.is_processing {
+                    self.process_manual_binaries();
+                }
+
+                ui.add_space(5.0);
+
+                egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                    let mut to_toggle = Vec::new();
+                    for binary in &self.manual_binaries {
+                        let is_checked = self.manual_selected_binaries.contains(&binary.path);
+                        let name = binary.path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
+                        let parent = binary.path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
+                        
+                        ui.horizontal(|ui| {
+                            let mut checked = is_checked;
+                            if ui.checkbox(&mut checked, "").changed() {
+                                to_toggle.push((binary.path.clone(), checked));
+                            }
+                            
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(name).strong());
+                                ui.small(format!("Path: .../{}/{}", parent, name));
+                                ui.small(format!(
+                                    "Archs: {:?} | Size: {} | Savable: {}",
+                                    binary.architectures,
+                                    crate::file_operations::FileOperations::human_readable_size(binary.size, 2),
+                                    crate::file_operations::FileOperations::human_readable_size(binary.savable_size, 2)
+                                ));
+                            });
+                        });
+                        ui.separator();
+                    }
+
+                    for (path, checked) in to_toggle {
+                        if checked {
+                            self.manual_selected_binaries.insert(path);
+                        } else {
+                            self.manual_selected_binaries.remove(&path);
+                        }
+                    }
+                });
             }
         }
     }

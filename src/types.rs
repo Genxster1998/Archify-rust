@@ -153,6 +153,7 @@ pub struct BinaryInfo {
     pub architectures: Vec<String>,
     pub size: u64,
     pub is_universal: bool,
+    pub savable_size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

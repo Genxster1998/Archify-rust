@@ -782,6 +782,237 @@ impl FileOperations {
             all_logs: Vec::new(), // We'll collect logs separately if needed
         })
     }
+
+    /// Scan directories/files recursively for universal/fat binaries
+    pub async fn scan_binaries_async(
+        paths: Vec<PathBuf>,
+        progress_sender: mpsc::Sender<LogMessage>,
+    ) -> Result<Vec<crate::types::BinaryInfo>> {
+        let concurrency_limit = num_cpus::get();
+        let semaphore = Arc::new(Semaphore::new(concurrency_limit));
+        let results_mutex = Arc::new(Mutex::new(Vec::new()));
+        let mut walk_paths = Vec::new();
+
+        for path in &paths {
+            if path.is_file() {
+                walk_paths.push(path.clone());
+            } else if path.is_dir() {
+                // Recursively gather all regular files
+                let files: Vec<_> = WalkDir::new(path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.path().to_path_buf())
+                    .collect();
+                walk_paths.extend(files);
+            }
+        }
+
+        let total_files = walk_paths.len();
+        let _ = progress_sender.send(LogMessage {
+            timestamp: chrono::Utc::now(),
+            level: LogLevel::Info,
+            message: format!("Scanning {} files for fat binaries...", total_files),
+        }).await;
+
+        let system_arch = get_system_architecture();
+        let mut futs = FuturesUnordered::new();
+
+        for (index, file_path) in walk_paths.into_iter().enumerate() {
+            let progress_sender = progress_sender.clone();
+            let semaphore = semaphore.clone();
+            let results_mutex = results_mutex.clone();
+            let system_arch = system_arch.clone();
+
+            futs.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                
+                // Fast check if file is Mach-O binary
+                if let Ok(true) = BinaryProcessor::is_mach_binary(&file_path) {
+                    if let Ok(archs) = BinaryProcessor::get_architectures(&file_path) {
+                        // We only care about universal/fat binaries (len > 1)
+                        if archs.len() > 1 {
+                            let size = tokio::fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
+                            let savable_size = Self::calculate_unneeded_arch_size_for_binary(&file_path, &system_arch).await.unwrap_or(0);
+                            
+                            let binary_info = crate::types::BinaryInfo {
+                                path: file_path.clone(),
+                                architectures: archs,
+                                size,
+                                is_universal: true,
+                                savable_size,
+                            };
+                            
+                            let mut results = results_mutex.lock().await;
+                            results.push(binary_info);
+                        }
+                    }
+                }
+                
+                // Periodic progress updates
+                if index % 20 == 0 || index == total_files - 1 {
+                    let _ = progress_sender.send(LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Info,
+                        message: format!("PROGRESS:{}/{}", index + 1, total_files),
+                    }).await;
+                }
+            }));
+        }
+
+        while let Some(res) = futs.next().await {
+            if let Err(e) = res {
+                error!("Error in binary scanning task: {}", e);
+            }
+        }
+
+        let results = Arc::try_unwrap(results_mutex).unwrap().into_inner();
+        
+        let done_msg = LogMessage {
+            timestamp: chrono::Utc::now(),
+            level: LogLevel::Info,
+            message: format!("BINARIES_LIST:{}", serde_json::to_string(&results).unwrap_or_default()),
+        };
+        let _ = progress_sender.send(done_msg).await;
+
+        Ok(results)
+    }
+
+    /// Batch process multiple dynamic dynamic/static binary files
+    pub async fn batch_process_binaries(
+        binary_paths: Vec<PathBuf>,
+        config: &BatchProcessingConfig,
+        progress_sender: mpsc::Sender<LogMessage>,
+    ) -> Result<BatchProcessingResult> {
+        let mut results = Vec::new();
+        let mut total_original_size = 0u64;
+        let mut total_final_size = 0u64;
+        let mut total_saved_space = 0u64;
+        let mut successful_apps = 0;
+        let mut failed_apps = 0;
+        let mut all_logs = Vec::new();
+
+        let total_binaries = binary_paths.len();
+        for (index, path) in binary_paths.into_iter().enumerate() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown").to_string();
+            
+            // Progress update
+            let _ = progress_sender.send(LogMessage {
+                timestamp: chrono::Utc::now(),
+                level: LogLevel::Info,
+                message: format!("PROGRESS:{}/{}", index, total_binaries),
+            }).await;
+
+            let original_size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+            total_original_size += original_size;
+
+            let mut logs = Vec::new();
+            let mut success = true;
+            let mut error_message = None;
+
+            // Thin the binary
+            match BinaryProcessor::remove_architectures(&path, &config.processing_config.target_architecture).await {
+                Ok(mut thin_logs) => {
+                    logs.append(&mut thin_logs);
+
+                    // Code-signing
+                    if !config.processing_config.no_sign {
+                        if config.processing_config.use_codesign {
+                            // Run codesign command directly on the binary path
+                            let status = tokio::process::Command::new("codesign")
+                                .arg("--force")
+                                .arg("--sign")
+                                .arg("-")
+                                .arg(&path)
+                                .status()
+                                .await;
+                            match status {
+                                Ok(status) if status.success() => {
+                                    logs.push(LogMessage {
+                                        timestamp: chrono::Utc::now(),
+                                        level: LogLevel::Success,
+                                        message: format!("Successfully signed with codesign: {}", path.display()),
+                                    });
+                                }
+                                _ => {
+                                    logs.push(LogMessage {
+                                        timestamp: chrono::Utc::now(),
+                                        level: LogLevel::Warning,
+                                        message: format!("Failed to sign with codesign: {}", path.display()),
+                                    });
+                                }
+                            }
+                        } else {
+                            match BinaryProcessor::sign_with_ldid(&path, config.processing_config.no_entitlements).await {
+                                Ok(mut sign_logs) => logs.append(&mut sign_logs),
+                                Err(e) => {
+                                    logs.push(LogMessage {
+                                        timestamp: chrono::Utc::now(),
+                                        level: LogLevel::Warning,
+                                        message: format!("Failed to sign with ldid: {}", e),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    success = false;
+                    error_message = Some(e.to_string());
+                    logs.push(LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Error,
+                        message: format!("Failed to thin binary {}: {}", name, e),
+                    });
+                }
+            }
+
+            let final_size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+            total_final_size += final_size;
+            
+            let saved_space = if original_size > final_size { original_size - final_size } else { 0 };
+            total_saved_space += saved_space;
+
+            if success {
+                successful_apps += 1;
+            } else {
+                failed_apps += 1;
+            }
+
+            for log in &logs {
+                let _ = progress_sender.send(log.clone()).await;
+            }
+
+            results.push(ProcessingResult {
+                app_path: path,
+                output_path: None,
+                original_size,
+                final_size,
+                saved_space,
+                success,
+                error_message,
+                logs: logs.clone(),
+            });
+
+            all_logs.extend(logs);
+        }
+
+        let _ = progress_sender.send(LogMessage {
+            timestamp: chrono::Utc::now(),
+            level: LogLevel::Info,
+            message: "Batch processing completed".to_string(),
+        }).await;
+
+        Ok(BatchProcessingResult {
+            results,
+            total_original_size,
+            total_final_size,
+            total_saved_space,
+            successful_apps,
+            failed_apps,
+            all_logs,
+        })
+    }
 }
 
 fn get_system_architecture() -> String {
