@@ -245,9 +245,10 @@ impl ArchifyApp {
         scan_dirs.extend(self.custom_scan_dirs.iter().cloned());
         let scan_depth = self.scan_depth;
 
+        let target_arch = self.processing_config.target_architecture.clone();
         // Spawn the scanning task
         runtime.spawn(async move {
-            if let Err(e) = FileOperations::scan_applications_async_multi(scan_dirs, show_only_universal, show_only_appstore, scan_depth, tx.clone()).await {
+            if let Err(e) = FileOperations::scan_applications_async_multi(scan_dirs, show_only_universal, show_only_appstore, scan_depth, target_arch, tx.clone()).await {
                 let _ = tx.send(LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Error,
@@ -274,10 +275,11 @@ impl ArchifyApp {
         self.scan_receiver = Some(rx);
 
         let paths = self.manual_selected_apps.clone();
+        let target_arch = self.processing_config.target_architecture.clone();
         let runtime = RUNTIME.get().expect("Runtime not initialized");
 
         runtime.spawn(async move {
-            if let Err(e) = FileOperations::scan_binaries_async(paths, tx.clone()).await {
+            if let Err(e) = FileOperations::scan_binaries_async(paths, target_arch, tx.clone()).await {
                 let _ = tx.send(LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Error,

@@ -17,7 +17,7 @@ pub struct FileOperations;
 
 impl FileOperations {
     /// Analyze a single application
-    async fn analyze_app(app_path: &Path) -> Result<Option<AppInfo>> {
+    async fn analyze_app(app_path: &Path, target_arch: &str) -> Result<Option<AppInfo>> {
         let name = app_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -32,7 +32,7 @@ impl FileOperations {
         let total_size = Self::calculate_directory_size(app_path).await?;
         let architectures = Self::get_app_architectures(app_path).await?;
         let app_type = Self::determine_app_type(&architectures);
-        let savable_size = Self::calculate_savable_size(app_path, &architectures).await?;
+        let savable_size = Self::calculate_savable_size(app_path, &architectures, target_arch).await?;
         let app_source = Self::detect_app_source(app_path).await?;
 
         Ok(Some(AppInfo {
@@ -156,12 +156,12 @@ impl FileOperations {
     async fn calculate_savable_size(
         app_path: &Path,
         app_architectures: &[String],
+        target_arch: &str,
     ) -> Result<u64> {
         if app_architectures.len() <= 1 {
             return Ok(0);
         }
 
-        let system_arch = get_system_architecture();
         let mut total_savable = 0u64;
 
         for entry in WalkDir::new(app_path)
@@ -171,7 +171,7 @@ impl FileOperations {
         {
             let file_path = entry.path();
             if BinaryProcessor::is_mach_binary(file_path)? {
-                if let Ok(savable) = Self::calculate_unneeded_arch_size_for_binary(file_path, &system_arch).await {
+                if let Ok(savable) = Self::calculate_unneeded_arch_size_for_binary(file_path, target_arch).await {
                     total_savable += savable;
                 }
             }
@@ -181,7 +181,7 @@ impl FileOperations {
     }
 
     /// Calculate unneeded architecture size for a single binary using lipo -detailed_info
-    pub async fn calculate_unneeded_arch_size_for_binary(binary_path: &Path, system_arch: &str) -> Result<u64> {
+    pub async fn calculate_unneeded_arch_size_for_binary(binary_path: &Path, target_arch: &str) -> Result<u64> {
         let output = tokio::process::Command::new("lipo")
             .arg("-detailed_info")
             .arg(binary_path)
@@ -216,10 +216,15 @@ impl FileOperations {
             }
         }
 
+        // If target arch is not in binary, we can't thin it to that arch, so savable size is 0
+        if !architecture_sizes.contains_key(target_arch) {
+            return Ok(0);
+        }
+
         // Calculate total size of unneeded architectures
         let unneeded_sizes: u64 = architecture_sizes
             .iter()
-            .filter(|(arch, _)| *arch != system_arch)
+            .filter(|(arch, _)| *arch != target_arch)
             .map(|(_, size)| size)
             .sum();
 
@@ -585,6 +590,7 @@ impl FileOperations {
         show_only_universal: bool,
         show_only_appstore: bool,
         scan_depth: usize,
+        target_arch: String,
         progress_sender: mpsc::Sender<LogMessage>,
     ) -> Result<()> {
         let mut apps = Vec::new();
@@ -627,6 +633,7 @@ impl FileOperations {
             let progress_sender = progress_sender.clone();
             let semaphore = semaphore.clone();
             let seen_paths = _seen_paths.clone();
+            let target_arch = target_arch.clone();
             futs.push(tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 // Avoid duplicates
@@ -647,7 +654,7 @@ impl FileOperations {
                     return None;
                 }
                 // Analyze the app
-                match FileOperations::analyze_app(&app_path).await {
+                match FileOperations::analyze_app(&app_path, &target_arch).await {
                     Ok(Some(app_info)) => Some(app_info),
                     _ => None,
                 }
@@ -786,6 +793,7 @@ impl FileOperations {
     /// Scan directories/files recursively for universal/fat binaries
     pub async fn scan_binaries_async(
         paths: Vec<PathBuf>,
+        target_arch: String,
         progress_sender: mpsc::Sender<LogMessage>,
     ) -> Result<Vec<crate::types::BinaryInfo>> {
         let concurrency_limit = num_cpus::get();
@@ -815,14 +823,13 @@ impl FileOperations {
             message: format!("Scanning {} files for fat binaries...", total_files),
         }).await;
 
-        let system_arch = get_system_architecture();
         let mut futs = FuturesUnordered::new();
 
         for (index, file_path) in walk_paths.into_iter().enumerate() {
             let progress_sender = progress_sender.clone();
             let semaphore = semaphore.clone();
             let results_mutex = results_mutex.clone();
-            let system_arch = system_arch.clone();
+            let target_arch = target_arch.clone();
 
             futs.push(tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
@@ -833,7 +840,7 @@ impl FileOperations {
                         // We only care about universal/fat binaries (len > 1)
                         if archs.len() > 1 {
                             let size = tokio::fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
-                            let savable_size = Self::calculate_unneeded_arch_size_for_binary(&file_path, &system_arch).await.unwrap_or(0);
+                            let savable_size = Self::calculate_unneeded_arch_size_for_binary(&file_path, &target_arch).await.unwrap_or(0);
                             
                             let binary_info = crate::types::BinaryInfo {
                                 path: file_path.clone(),
