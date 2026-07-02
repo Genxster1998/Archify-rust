@@ -1060,24 +1060,36 @@ impl ArchifyApp {
 
     fn render_manual_thinning_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Manual Thinning");
-        ui.label("Select one or more .app bundles from any location to thin in-place.");
-        if ui.button("Select .app Bundles...").clicked() {
-            if let Some(paths) = FileDialog::new()
-                .set_directory(std::env::current_dir().unwrap_or_default())
-                .pick_files() {
-                // Only keep .app directories
-                self.manual_selected_apps = paths
-                    .into_iter()
-                    .filter(|p| p.extension().map_or(false, |ext| ext == "app"))
-                    .collect();
+        ui.label("Select one or more .app bundles or folders from any location to thin in-place.");
+        
+        ui.horizontal(|ui| {
+            if ui.button("Select .app Bundles...").clicked() {
+                if let Some(paths) = FileDialog::new()
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .pick_files() {
+                    // Only keep .app directories
+                    self.manual_selected_apps = paths
+                        .into_iter()
+                        .filter(|p| p.extension().map_or(false, |ext| ext == "app"))
+                        .collect();
+                }
             }
-        }
+
+            if ui.button("Select Folders...").clicked() {
+                if let Some(paths) = FileDialog::new()
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .pick_folders() {
+                    self.manual_selected_apps = paths;
+                }
+            }
+        });
+
         if !self.manual_selected_apps.is_empty() {
-            ui.label("Selected apps:");
+            ui.label("Selected paths:");
             for path in &self.manual_selected_apps {
                 ui.label(format!("- {}", path.display()));
             }
-            if ui.button("Process Selected Apps").clicked() && !self.is_processing {
+            if ui.button("Process Selected Items").clicked() && !self.is_processing {
                 self.process_manual_selected_apps();
             }
         }
