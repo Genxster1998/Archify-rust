@@ -1232,7 +1232,7 @@ impl ArchifyApp {
 
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Selected:").size(13.0));
-                    ui.label(RichText::new(format!("{} binary/binaries", selected_count)).size(13.0).color(egui::Color32::from_rgb(52, 152, 219)));
+                    ui.label(RichText::new(format!("{} binary(ies)", selected_count)).size(13.0).color(egui::Color32::from_rgb(52, 152, 219)));
                     ui.separator();
                     ui.label(RichText::new("Total Size:").size(13.0));
                     ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(total_size, 2)).size(13.0).color(egui::Color32::YELLOW));
