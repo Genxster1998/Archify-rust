@@ -1074,7 +1074,7 @@ impl ArchifyApp {
             }
         } else {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("✗").size(15.0).color(egui::Color32::RED).strong());
+                ui.label(RichText::new("×").size(18.0).color(egui::Color32::RED).strong());
                 ui.label("Not Installed");
             });
             if let Some(error) = &self.helper_status.error {
@@ -1481,7 +1481,7 @@ impl ArchifyApp {
                         self.confirm_elevated_processing();
                     }
                     
-                    if ui.button(RichText::new("✗ Cancel").strong()).clicked() {
+                    if ui.button(RichText::new("× Cancel").strong()).clicked() {
                         self.cancel_elevated_processing();
                     }
                 });
