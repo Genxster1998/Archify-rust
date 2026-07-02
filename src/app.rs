@@ -778,6 +778,30 @@ impl ArchifyApp {
     }
 
     fn render_applications_tab(&mut self, ui: &mut egui::Ui) {
+        use egui::RichText;
+        use egui::Color32;
+
+        // Status bar panel
+        egui::TopBottomPanel::bottom("status_bar_panel").show_inside(ui, |ui| {
+            let selected_apps: Vec<_> = self.apps.iter().filter(|a| self.selected_apps.contains(&a.path)).collect();
+            let selected_count = selected_apps.len();
+            let total_size: u64 = selected_apps.iter().map(|a| a.total_size).sum();
+            let savable_size: u64 = selected_apps.iter().map(|a| a.savable_size).sum();
+            ui.add_space(2.0);
+            
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Selected:").size(13.0));
+                ui.label(RichText::new(format!("{} app(s)", selected_count)).size(13.0).color(Color32::from_rgb(52, 152, 219)));
+                ui.separator();
+                ui.label(RichText::new("Total Size:").size(13.0));
+                ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(total_size, 2)).size(13.0).color(Color32::YELLOW));
+                ui.separator();
+                ui.label(RichText::new("Savable:").size(13.0));
+                ui.label(RichText::new(crate::file_operations::FileOperations::human_readable_size(savable_size, 2)).size(13.0).color(Color32::GREEN));
+            });
+            ui.add_space(2.0);
+        });
+
         ui.horizontal(|ui| {
             if ui.button("Scan Applications").clicked() && !self.is_scanning {
                 self.scan_applications();
