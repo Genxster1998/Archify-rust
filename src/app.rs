@@ -63,7 +63,6 @@ pub struct ArchifyApp {
     // Icon texture cache for About tab
     pub about_icon_texture: Option<egui::TextureHandle>,
     pub about_gpl_texture: Option<egui::TextureHandle>,
-    pub fonts_configured: bool,
 }
 
 impl ArchifyApp {
@@ -99,40 +98,7 @@ impl ArchifyApp {
         }
     }
 
-    pub fn configure_system_fallback_fonts(ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
 
-        let paths = [
-            "/System/Library/Fonts/LucidaGrande.ttc",
-            "/System/Library/Fonts/Supplemental/LucidaGrande.ttf",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/Library/Fonts/Arial.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-        ];
-
-        let mut loaded = false;
-        for path in &paths {
-            if let Ok(font_data) = std::fs::read(path) {
-                fonts.font_data.insert(
-                    "system_symbols".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-                );
-                
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    family.push("system_symbols".to_owned());
-                }
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    family.push("system_symbols".to_owned());
-                }
-                loaded = true;
-                break;
-            }
-        }
-
-        if loaded {
-            ctx.set_fonts(fonts);
-        }
-    }
 
     pub fn new() -> Self {
         // Initialize the global runtime if not already done
@@ -206,7 +172,6 @@ impl ArchifyApp {
             // Icon texture cache for About tab
             about_icon_texture: None,
             about_gpl_texture: None,
-            fonts_configured: false,
         };
 
         if let Some(s) = settings {
@@ -1553,10 +1518,6 @@ impl ArchifyApp {
 impl eframe::App for ArchifyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if !self.fonts_configured {
-            Self::configure_system_fallback_fonts(&ctx);
-            self.fonts_configured = true;
-        }
 
         self.handle_scanning_messages();
         self.handle_helper_logs();
