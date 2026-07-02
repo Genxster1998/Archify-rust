@@ -905,6 +905,7 @@ impl ArchifyApp {
             }
             
             if self.is_scanning {
+                ui.spinner();
                 ui.label("Scanning...");
             }
             
@@ -914,14 +915,16 @@ impl ArchifyApp {
         });
         
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.show_only_universal, "Show only universal binaries");
+            ui.checkbox(&mut self.show_only_universal, "Show only universal binaries")
+                .on_hover_text("Only show applications that contain multiple architectures (Fat Binaries).");
             if self.show_only_universal {
                 ui.label("(Filtering universal binaries only)");
             }
         });
         
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.show_only_appstore, "Show only App Store apps");
+            ui.checkbox(&mut self.show_only_appstore, "Show only App Store apps")
+                .on_hover_text("Only show applications downloaded from the Mac App Store.");
             if self.show_only_appstore {
                 ui.label("(Filtering App Store apps only)");
             }
@@ -959,36 +962,43 @@ impl ArchifyApp {
         
         // Show scanning progress if scanning
         if self.is_scanning {
-            ui.label(format!("Scanning applications... {}", self.current_scanning_app));
-            ui.add(egui::ProgressBar::new(self.progress).show_percentage());
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("Scanning applications... {}", self.current_scanning_app));
+            });
+            ui.add(egui::ProgressBar::new(self.progress).show_percentage().animate(true));
         }
         
         // Applications list
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for app_info in self.apps.iter().filter(|a| {
-                let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
-                let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
-                universal_filter && appstore_filter
-            }) {
-                let mut selected = self.selected_apps.contains(&app_info.path);
-                if ui.checkbox(&mut selected, &format!("{}", app_info.name)).clicked() {
-                    if selected {
-                        self.selected_apps.push(app_info.path.clone());
-                    } else {
-                        self.selected_apps.retain(|p| p != &app_info.path);
-                    }
+            egui::Grid::new("apps_grid").num_columns(1).striped(true).spacing([0.0, 8.0]).show(ui, |ui| {
+                for app_info in self.apps.iter().filter(|a| {
+                    let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
+                    let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
+                    universal_filter && appstore_filter
+                }) {
+                    ui.vertical(|ui| {
+                        let mut selected = self.selected_apps.contains(&app_info.path);
+                        if ui.checkbox(&mut selected, &format!("{}", app_info.name)).clicked() {
+                            if selected {
+                                self.selected_apps.push(app_info.path.clone());
+                            } else {
+                                self.selected_apps.retain(|p| p != &app_info.path);
+                            }
+                        }
+                        ui.label(&format!("Type: {:?}", app_info.app_type));
+                        ui.label(&format!("Source: {}", app_info.app_source));
+                        ui.label(&format!("Size: {}", FileOperations::human_readable_size(app_info.total_size, 2)));
+                        ui.label(&format!("Estimated Savable: {}", FileOperations::human_readable_size(app_info.savable_size, 2)));
+                        // Show actual saved space if available (after processing)
+                        if let Some(saved) = crate::types::ProcessingState::default().saved_spaces.get(&app_info.name) {
+                            ui.label(&format!("Actual Saved: {}", FileOperations::human_readable_size(*saved, 2)));
+                        }
+                        ui.label(&format!("Architectures: {:?}", app_info.architectures));
+                    });
+                    ui.end_row();
                 }
-                ui.label(&format!("Type: {:?}", app_info.app_type));
-                ui.label(&format!("Source: {}", app_info.app_source));
-                ui.label(&format!("Size: {}", FileOperations::human_readable_size(app_info.total_size, 2)));
-                ui.label(&format!("Estimated Savable: {}", FileOperations::human_readable_size(app_info.savable_size, 2)));
-                // Show actual saved space if available (after processing)
-                if let Some(saved) = crate::types::ProcessingState::default().saved_spaces.get(&app_info.name) {
-                    ui.label(&format!("Actual Saved: {}", FileOperations::human_readable_size(*saved, 2)));
-                }
-                ui.label(&format!("Architectures: {:?}", app_info.architectures));
-                ui.separator();
-            }
+            });
         });
     }
     
@@ -1253,30 +1263,33 @@ impl ArchifyApp {
 
                 egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
                     let mut to_toggle = Vec::new();
-                    for binary in &self.manual_binaries {
-                        let is_checked = self.manual_selected_binaries.contains(&binary.path);
-                        let name = binary.path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
-                        let parent = binary.path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
-                        
-                        ui.horizontal(|ui| {
-                            let mut checked = is_checked;
-                            if ui.checkbox(&mut checked, "").changed() {
-                                to_toggle.push((binary.path.clone(), checked));
-                            }
+                    
+                    egui::Grid::new("manual_apps_grid").num_columns(1).striped(true).spacing([0.0, 8.0]).show(ui, |ui| {
+                        for binary in &self.manual_binaries {
+                            let is_checked = self.manual_selected_binaries.contains(&binary.path);
+                            let name = binary.path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
+                            let parent = binary.path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
                             
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(name).strong());
-                                ui.small(format!("Path: .../{}/{}", parent, name));
-                                ui.small(format!(
-                                    "Archs: {:?} | Size: {} | Savable: {}",
-                                    binary.architectures,
-                                    crate::file_operations::FileOperations::human_readable_size(binary.size, 2),
-                                    crate::file_operations::FileOperations::human_readable_size(binary.savable_size, 2)
-                                ));
+                            ui.horizontal(|ui| {
+                                let mut checked = is_checked;
+                                if ui.checkbox(&mut checked, "").changed() {
+                                    to_toggle.push((binary.path.clone(), checked));
+                                }
+                                
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(name).strong());
+                                    ui.small(format!("Path: .../{}/{}", parent, name));
+                                    ui.small(format!(
+                                        "Archs: {:?} | Size: {} | Savable: {}",
+                                        binary.architectures,
+                                        crate::file_operations::FileOperations::human_readable_size(binary.size, 2),
+                                        crate::file_operations::FileOperations::human_readable_size(binary.savable_size, 2)
+                                    ));
+                                });
                             });
-                        });
-                        ui.separator();
-                    }
+                            ui.end_row();
+                        }
+                    });
 
                     for (path, checked) in to_toggle {
                         if checked {
