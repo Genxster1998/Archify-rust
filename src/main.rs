@@ -72,7 +72,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([450.0, 770.0])
+            .with_inner_size([400.0, 770.0])
             .with_min_inner_size([400.0, 370.0])
             .with_icon(std::sync::Arc::new(icon.unwrap_or_default())),
         ..Default::default()
