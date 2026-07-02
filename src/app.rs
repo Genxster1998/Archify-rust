@@ -115,7 +115,7 @@ impl ArchifyApp {
             if let Ok(font_data) = std::fs::read(path) {
                 fonts.font_data.insert(
                     "system_symbols".to_owned(),
-                    egui::FontData::from_owned(font_data),
+                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
                 );
                 
                 if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
@@ -873,7 +873,7 @@ impl ArchifyApp {
         use egui::Color32;
 
         // Status bar panel
-        egui::TopBottomPanel::bottom("status_bar_panel").show_inside(ui, |ui| {
+        egui::Panel::bottom("status_bar_panel").show(ui, |ui| {
             let selected_apps: Vec<_> = self.apps.iter().filter(|a| self.selected_apps.contains(&a.path)).collect();
             let selected_count = selected_apps.len();
             let total_size: u64 = selected_apps.iter().map(|a| a.total_size).sum();
@@ -1536,9 +1536,10 @@ impl ArchifyApp {
 }
 
 impl eframe::App for ArchifyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if !self.fonts_configured {
-            Self::configure_system_fallback_fonts(ctx);
+            Self::configure_system_fallback_fonts(&ctx);
             self.fonts_configured = true;
         }
 
@@ -1546,36 +1547,34 @@ impl eframe::App for ArchifyApp {
         self.handle_helper_logs();
         self.handle_processing_logs();
         
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Tabs
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.selected_tab, 0, "Applications");
-                ui.selectable_value(&mut self.selected_tab, 1, "Settings");
-                ui.selectable_value(&mut self.selected_tab, 2, "Logs");
-                ui.selectable_value(&mut self.selected_tab, 3, "Manual");
-                ui.selectable_value(&mut self.selected_tab, 4, "About");
-            });
-            
-            ui.separator();
-            
-            match self.selected_tab {
-                0 => self.render_applications_tab(ui),
-                1 => self.render_settings_tab(ui),
-                2 => self.render_logs_tab(ui),
-                3 => self.render_manual_thinning_tab(ui),
-                4 => self.render_about_tab(ui),
-                _ => unreachable!(),
-            }
+        // Tabs
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.selected_tab, 0, "Applications");
+            ui.selectable_value(&mut self.selected_tab, 1, "Settings");
+            ui.selectable_value(&mut self.selected_tab, 2, "Logs");
+            ui.selectable_value(&mut self.selected_tab, 3, "Manual");
+            ui.selectable_value(&mut self.selected_tab, 4, "About");
         });
+        
+        ui.separator();
+        
+        match self.selected_tab {
+            0 => self.render_applications_tab(ui),
+            1 => self.render_settings_tab(ui),
+            2 => self.render_logs_tab(ui),
+            3 => self.render_manual_thinning_tab(ui),
+            4 => self.render_about_tab(ui),
+            _ => unreachable!(),
+        }
         
         // Show elevated permission dialog if needed
         if self.show_elevated_dialog {
-            self.render_elevated_dialog(ctx);
+            self.render_elevated_dialog(&ctx);
         }
         
         // Show success dialog if needed
         if self.show_success_dialog {
-            self.render_success_dialog(ctx);
+            self.render_success_dialog(&ctx);
         }
         
         // Request continuous updates while scanning
@@ -1584,7 +1583,7 @@ impl eframe::App for ArchifyApp {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         // Save settings to disk
         self.save_settings();
 

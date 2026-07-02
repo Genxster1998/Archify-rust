@@ -8,26 +8,24 @@ pub struct GuiState {
 }
 
 impl GuiState {
-    pub fn render(&mut self, ctx: &egui::Context, app: &mut ArchifyApp) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Archify Rust - ARM64 Binary Remover");
-            
-            // Tabs
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.selected_tab, 0, "Applications");
-                ui.selectable_value(&mut self.selected_tab, 1, "Settings");
-                ui.selectable_value(&mut self.selected_tab, 2, "Logs");
-            });
-            
-            ui.separator();
-            
-            match self.selected_tab {
-                0 => self.render_applications_tab(ui, app),
-                1 => self.render_settings_tab(ui, app),
-                2 => self.render_logs_tab(ui, app),
-                _ => unreachable!(),
-            }
+    pub fn render(&mut self, ui: &mut egui::Ui, app: &mut ArchifyApp) {
+        ui.heading("Archify Rust - ARM64 Binary Remover");
+        
+        // Tabs
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.selected_tab, 0, "Applications");
+            ui.selectable_value(&mut self.selected_tab, 1, "Settings");
+            ui.selectable_value(&mut self.selected_tab, 2, "Logs");
         });
+        
+        ui.separator();
+        
+        match self.selected_tab {
+            0 => self.render_applications_tab(ui, app),
+            1 => self.render_settings_tab(ui, app),
+            2 => self.render_logs_tab(ui, app),
+            _ => unreachable!(),
+        }
     }
     
     fn render_applications_tab(&mut self, ui: &mut egui::Ui, app: &mut ArchifyApp) {

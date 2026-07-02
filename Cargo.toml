@@ -8,8 +8,8 @@ license = "GPL-3.0"
 
 [dependencies]
 # GUI framework
-eframe = "0.26.0"
-egui = "0.26.0"
+eframe = "0.35.0"
+egui = "0.35.0"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

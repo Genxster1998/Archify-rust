@@ -74,13 +74,13 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([450.0, 770.0])
             .with_min_inner_size([400.0, 370.0])
-            .with_icon(icon.unwrap_or_default()),
+            .with_icon(std::sync::Arc::new(icon.unwrap_or_default())),
         ..Default::default()
     };
 
     eframe::run_native(
         "Archify Rust",
         options,
-        Box::new(|_cc| Box::new(ArchifyApp::new())),
+        Box::new(|_cc| Ok(Box::new(ArchifyApp::new()))),
     )
 } 
