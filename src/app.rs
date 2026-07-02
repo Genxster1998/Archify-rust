@@ -1483,7 +1483,7 @@ impl ArchifyApp {
                         self.confirm_elevated_processing();
                     }
                     
-                    if ui.button(RichText::new("× Cancel").strong()).clicked() {
+                    if ui.button(RichText::new("❌ Cancel").strong()).clicked() {
                         self.cancel_elevated_processing();
                     }
                 });
