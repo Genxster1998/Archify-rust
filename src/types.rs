@@ -187,4 +187,14 @@ fn get_system_architecture() -> String {
     
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     return "unknown".to_string();
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSettings {
+    pub processing_config: ProcessingConfig,
+    pub batch_config: BatchProcessingConfig,
+    pub custom_scan_dirs: Vec<PathBuf>,
+    pub scan_depth: usize,
+    pub show_only_universal: bool,
+    pub show_only_appstore: bool,
 } 

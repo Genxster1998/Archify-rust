@@ -1,5 +1,5 @@
 use crate::file_operations::FileOperations;
-use crate::types::{AppInfo, LogLevel, LogMessage, ProcessingConfig, BatchProcessingConfig, AppSource};
+use crate::types::{AppInfo, LogLevel, LogMessage, ProcessingConfig, BatchProcessingConfig, AppSource, UserSettings};
 use eframe::egui;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -8,8 +8,15 @@ use rfd::FileDialog;
 use crate::privileged_helper::{PrivilegedHelper, HelperStatus};
 use std::sync::OnceLock;
 use image;
+use dirs;
 
-
+fn get_settings_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|mut p| {
+        p.push("archify-rust");
+        p.push("settings.json");
+        p
+    })
+}
 
 // Global runtime for the GUI app
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -55,15 +62,47 @@ pub struct ArchifyApp {
 }
 
 impl ArchifyApp {
+    pub fn load_settings() -> Option<UserSettings> {
+        if let Some(path) = get_settings_path() {
+            if path.exists() {
+                if let Ok(json) = std::fs::read_to_string(path) {
+                    if let Ok(settings) = serde_json::from_str::<UserSettings>(&json) {
+                        return Some(settings);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn save_settings(&self) {
+        if let Some(path) = get_settings_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let settings = UserSettings {
+                processing_config: self.processing_config.clone(),
+                batch_config: self.batch_config.clone(),
+                custom_scan_dirs: self.custom_scan_dirs.clone(),
+                scan_depth: self.scan_depth,
+                show_only_universal: self.show_only_universal,
+                show_only_appstore: self.show_only_appstore,
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
     pub fn new() -> Self {
         // Initialize the global runtime if not already done
         let _runtime = RUNTIME.get_or_init(|| {
             Runtime::new().expect("Failed to create Tokio runtime")
         });
         
-
+        let settings = Self::load_settings();
         
-        Self {
+        let mut app = Self {
             selected_tab: 0,
             apps: Vec::new(),
             selected_apps: Vec::new(),
@@ -123,7 +162,18 @@ impl ArchifyApp {
             // Icon texture cache for About tab
             about_icon_texture: None,
             about_gpl_texture: None,
+        };
+
+        if let Some(s) = settings {
+            app.processing_config = s.processing_config;
+            app.batch_config = s.batch_config;
+            app.custom_scan_dirs = s.custom_scan_dirs;
+            app.scan_depth = s.scan_depth;
+            app.show_only_universal = s.show_only_universal;
+            app.show_only_appstore = s.show_only_appstore;
         }
+
+        app
     }
 
     pub fn scan_applications(&mut self) {
@@ -955,6 +1005,12 @@ impl ArchifyApp {
                     });
                 });
         }
+
+        ui.separator();
+        if ui.button("Save Settings").clicked() {
+            self.save_settings();
+            self.add_log(LogLevel::Success, "Configuration settings saved successfully.".to_string());
+        }
     }
     
     fn render_logs_tab(&mut self, ui: &mut egui::Ui) {
@@ -1286,6 +1342,9 @@ impl eframe::App for ArchifyApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Save settings to disk
+        self.save_settings();
+
         // Clean up any ongoing operations
         self.is_scanning = false;
         self.is_processing = false;
