@@ -1,10 +1,11 @@
 [package]
 name = "archify-rust"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
 description = "A Rust implementation of Archify for removing ARM64e/ARM64 code from binaries"
 license = "GPL-3.0"
+default-run = "archify-rust"
 
 [dependencies]
 # GUI framework

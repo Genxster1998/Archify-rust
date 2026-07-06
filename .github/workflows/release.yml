@@ -52,11 +52,6 @@ jobs:
           xcode-select --install || true
           sudo xcodebuild -license accept
 
-      - name: Install clang for SMJobBless installer
-        run: |
-          # Ensure clang is available
-          clang --version
-
       - name: Create ICNS icon
         run: |
           echo "Creating ICNS icon..."
@@ -114,16 +109,6 @@ jobs:
             exit 1
           fi
 
-      - name: Build SMJobBless installer
-        run: |
-          echo "Building SMJobBless installer..."
-          make clean
-          make
-          if [ $? -ne 0 ]; then
-            echo "Failed to build smjobbless_installer"
-            exit 1
-          fi
-
       - name: Create app bundle
         run: |
           echo "Creating app bundle for ${{ matrix.target }}..."
@@ -139,10 +124,8 @@ jobs:
           
           # Define paths
           APP_BUNDLE="target/${{ matrix.target }}/release/bundle/osx/Archify.app"
-          LAUNCHSERVICES_DIR="$APP_BUNDLE/Contents/Library/LaunchServices"
+          MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
           HELPER_SOURCE="target/${{ matrix.target }}/release/helper"
-          HELPER_PLIST_SOURCE="helper/com.archify.helper.plist"
-          INSTALLER_SOURCE="smjobbless_installer"
           
           # Check if files exist
           if [ ! -f "$HELPER_SOURCE" ]; then
@@ -155,22 +138,9 @@ jobs:
             exit 1
           fi
           
-          if [ ! -f "$INSTALLER_SOURCE" ]; then
-            echo "smjobbless_installer not found"
-            exit 1
-          fi
-          
-          # Create LaunchServices directory
-          mkdir -p "$LAUNCHSERVICES_DIR"
-          
-          # Copy helper binary, plist, and installer
-          cp "$HELPER_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper"
-          cp "$HELPER_PLIST_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper.plist"
-          cp "$INSTALLER_SOURCE" "$LAUNCHSERVICES_DIR/smjobbless_installer"
-          
-          # Set executable permissions
-          chmod +x "$LAUNCHSERVICES_DIR/com.archify.helper"
-          chmod +x "$LAUNCHSERVICES_DIR/smjobbless_installer"
+          # Copy helper binary
+          cp "$HELPER_SOURCE" "$MACOS_DIR/helper"
+          chmod +x "$MACOS_DIR/helper"
           
           echo "App bundle structure setup complete"
 
@@ -181,6 +151,9 @@ jobs:
           
           # Install create-dmg
           brew install create-dmg
+          
+          # Remove existing DMG from cache if it exists
+          rm -f "target/Archify-x86_64.dmg"
           
           # Create DMG
           create-dmg \
@@ -202,6 +175,9 @@ jobs:
           
           # Install create-dmg
           brew install create-dmg
+          
+          # Remove existing DMG from cache if it exists
+          rm -f "target/Archify-arm64.dmg"
           
           # Create DMG
           create-dmg \
@@ -345,6 +321,9 @@ jobs:
           
           # Install create-dmg
           brew install create-dmg
+          
+          # Remove existing DMG from cache if it exists
+          rm -f "target/Archify-universal.dmg"
           
           # Create universal DMG
           create-dmg \

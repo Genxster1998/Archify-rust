@@ -933,7 +933,7 @@ impl ArchifyApp {
         }
         
         // Applications list
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("apps_grid").num_columns(1).striped(true).spacing([0.0, 8.0]).show(ui, |ui| {
                 for app_info in self.apps.iter().filter(|a| {
                     let universal_filter = !self.show_only_universal || a.app_type == crate::types::AppType::Universal;
@@ -1036,7 +1036,7 @@ impl ArchifyApp {
             }
         });
         
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for log in &self.logs {
                 let color = match log.level {
                     LogLevel::Info => egui::Color32::WHITE,
@@ -1135,7 +1135,7 @@ impl ArchifyApp {
 
                 ui.add_space(5.0);
 
-                egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(350.0).auto_shrink([false, false]).show(ui, |ui| {
                     let mut to_toggle = Vec::new();
                     
                     egui::Grid::new("manual_apps_grid").num_columns(1).striped(true).spacing([0.0, 8.0]).show(ui, |ui| {
@@ -1213,108 +1213,67 @@ impl ArchifyApp {
 
         // --- Now do all your UI code here ---
         ui.vertical_centered(|ui| {
-            ui.add_space(20.0);
-            // App icon with beautiful styling
-            ui.add_space(10.0);
+            ui.add_space(40.0);
+            
+            // App icon
             if let Some(texture) = &self.about_icon_texture {
-                ui.image((texture.id(), egui::Vec2::splat(64.0))); // Larger icon
+                ui.image((texture.id(), egui::Vec2::splat(96.0)));
             } else {
-                ui.label(egui::RichText::new("📱")
-                    .size(64.0)
-                    .color(egui::Color32::from_rgb(52, 152, 219)));
+                ui.label(egui::RichText::new("📱").size(96.0));
             }
-            ui.add_space(15.0);
-            // App name with enhanced styling
-            ui.heading(egui::RichText::new("Archify Rust")
-                .size(32.0)
-                .strong()
-                .color(egui::Color32::from_rgb(52, 152, 219)));
-
-            // Version with subtle styling
-            ui.label(egui::RichText::new("v0.2.1")
-                .size(18.0)
-                .color(egui::Color32::from_rgb(149, 165, 166))
-                .italics());
-            ui.add_space(25.0);
-            // Description in a beautiful frame
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("A powerful macOS application for optimizing universal binaries by removing unnecessary architectures, helping you save disk space while maintaining compatibility with your target system.")
-                    .size(14.0)
-                    .color(egui::Color32::from_rgb(236, 240, 241))
-                    .italics());
-            });
-            ui.add_space(30.0);
-            // Developer section with enhanced styling
-            ui.group(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("💻 Developer")
-                        .size(14.0)
-                        .color(egui::Color32::from_rgb(149, 165, 166))
-                        .strong());
-                    ui.label(egui::RichText::new("© 2025 Genxster1998")
-                        .size(20.0)
-                        .color(egui::Color32::from_rgb(52, 152, 219))
-                        .strong());
-                });
-            });
-            ui.add_space(20.0);
-            // License section with GPL logo
-            ui.group(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("🖹 License")
-                        .size(14.0)
-                        .color(egui::Color32::from_rgb(149, 165, 166))
-                        .strong());
-                    if let Some(gpl_texture) = &self.about_gpl_texture {
-                        // Get the original size to maintain aspect ratio
-                        let size = gpl_texture.size();
-                        let aspect_ratio = size[0] as f32 / size[1] as f32;
-                        let display_width = 48.0;
-                        let display_height = display_width / aspect_ratio;
-                        ui.image((gpl_texture.id(), egui::Vec2::new(display_width, display_height)));
-                    }
-                    ui.label(egui::RichText::new("GNU General Public License v3.0")
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(149, 165, 166))
-                        .italics());
-                });
-            });
-            ui.add_space(20.0);
-            // GitHub section with enhanced styling
-            ui.group(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("🔗 Source Code")
-                        .size(14.0)
-                        .color(egui::Color32::from_rgb(149, 165, 166))
-                        .strong());
-                    ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new(egui::special_emojis::GITHUB.to_string())
-                            .size(24.0)
-                            .color(egui::Color32::from_rgb(52, 152, 219)));
-                        if ui.link(egui::RichText::new("GitHub Repository")
-                            .size(18.0)
-                            .color(egui::Color32::from_rgb(52, 152, 219))
-                            .underline()
-                            .strong()).clicked() {
-                                // Open URL in default browser
-                                let _ = std::process::Command::new("open")
-                                    .arg("https://github.com/Genxster1998/Archify-rust")
-                                    .output();
-                            }
-                    });
-                    ui.label(egui::RichText::new("https://github.com/Genxster1998/Archify-rust")
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(149, 165, 166))
-                        .italics());
-                });
-            });
-            ui.add_space(20.0);
-            // Footer with additional info
-            ui.separator();
-            ui.label(egui::RichText::new("Built with Rust and egui")
+            
+            ui.add_space(16.0);
+            
+            // App name and version
+            ui.label(egui::RichText::new("Archify")
+                .size(42.0)
+                .strong());
+            
+            ui.label(egui::RichText::new("Version 0.3.0")
+                .size(16.0)
+                .color(ui.visuals().weak_text_color()));
+                
+            ui.add_space(32.0);
+            
+            // Description
+            ui.label(egui::RichText::new("A powerful, minimal macOS tool to optimize universal binaries by\nstripping unnecessary architectures. Save disk space effortlessly.")
+                .size(15.0)
+                .color(ui.visuals().weak_text_color()));
+                
+            ui.add_space(48.0);
+            
+            // Developer
+            ui.label(egui::RichText::new("DEVELOPED BY").size(10.0).color(ui.visuals().weak_text_color()).strong());
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new("Genxster1998").size(16.0));
+            
+            ui.add_space(24.0);
+            
+            // License
+            ui.label(egui::RichText::new("LICENSE").size(10.0).color(ui.visuals().weak_text_color()).strong());
+            ui.add_space(4.0);
+            if let Some(gpl_texture) = &self.about_gpl_texture {
+                let aspect = gpl_texture.size()[0] as f32 / gpl_texture.size()[1] as f32;
+                ui.image((gpl_texture.id(), egui::Vec2::new(48.0, 48.0 / aspect)));
+            }
+            ui.label(egui::RichText::new("GNU General Public License v3.0").size(13.0));
+            
+            ui.add_space(24.0);
+            
+            // Source Code
+            ui.label(egui::RichText::new("SOURCE").size(10.0).color(ui.visuals().weak_text_color()).strong());
+            ui.add_space(4.0);
+            if ui.link(egui::RichText::new(format!("{} GitHub Repository", egui::special_emojis::GITHUB)).size(16.0)).clicked() {
+                let _ = std::process::Command::new("open")
+                    .arg("https://github.com/Genxster1998/Archify-rust")
+                    .output();
+            }
+            
+            ui.add_space(60.0);
+            
+            ui.label(egui::RichText::new("Built with Rust & egui")
                 .size(12.0)
-                .color(egui::Color32::from_rgb(149, 165, 166))
-                .italics());
+                .color(ui.visuals().weak_text_color()));
         });
     }
 
@@ -1400,7 +1359,7 @@ impl ArchifyApp {
                 });
                 
                 // Use scrollable area for long messages
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
                     // Split message into lines for better formatting
                     for line in self.success_message.lines() {
                         if line.starts_with("• ") {
