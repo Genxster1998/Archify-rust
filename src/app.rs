@@ -499,6 +499,27 @@ impl ArchifyApp {
             return;
         }
 
+        let mut normal_binaries = Vec::new();
+        let mut elevated_binaries = Vec::new();
+
+        for binary in selected_binaries {
+            if requires_elevated_permissions(&binary) {
+                elevated_binaries.push(binary);
+            } else {
+                normal_binaries.push(binary);
+            }
+        }
+
+        if !elevated_binaries.is_empty() {
+            self.elevated_apps.extend(elevated_binaries);
+            self.show_elevated_dialog = true;
+            self.add_log(LogLevel::Info, "Elevated privileges required for some binaries".to_string());
+        }
+
+        if normal_binaries.is_empty() {
+            return;
+        }
+
         self.is_processing = true;
         self.was_processing = true;
         self.processing_start_time = Some(std::time::Instant::now());
@@ -513,7 +534,7 @@ impl ArchifyApp {
 
         let runtime = RUNTIME.get().expect("Runtime not initialized");
         runtime.spawn(async move {
-            if let Err(e) = FileOperations::batch_process_binaries(selected_binaries, &config, tx.clone()).await {
+            if let Err(e) = FileOperations::batch_process_binaries(normal_binaries, &config, tx.clone()).await {
                 let _ = tx.send(LogMessage {
                     timestamp: chrono::Utc::now(),
                     level: LogLevel::Error,
@@ -712,15 +733,15 @@ impl ArchifyApp {
                             }
                             
                             if total_saved > 0 {
-                                message.push_str(&format!("\n✓ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
+                                message.push_str(&format!("\n✔ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
                             }
                             
-                            message.push_str("\n\nⓘ Tip: Check the Logs tab for detailed information about each failure.");
+                            message.push_str("\n\nℹ Tip: Check the Logs tab for detailed information about each failure.");
                             
                             self.success_message = message;
                         }
                     } else if timeout_elapsed && !has_completion_message {
-                        self.success_message = "✓ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
+                        self.success_message = "✔ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
                     } else {
                         // Calculate total saved space from logs
                         let mut total_saved = 0u64;
@@ -738,11 +759,11 @@ impl ArchifyApp {
                         
                         if total_saved > 0 {
                             self.success_message = format!(
-                                "✓ Binary thinning completed successfully!\n\nTotal space saved: {}",
+                                "✔ Binary thinning completed successfully!\n\nTotal space saved: {}",
                                 FileOperations::human_readable_size(total_saved, 2)
                             );
                         } else {
-                            self.success_message = "✓ Binary thinning completed successfully!".to_string();
+                            self.success_message = "✔ Binary thinning completed successfully!".to_string();
                         }
                     }
                 }
@@ -797,15 +818,15 @@ impl ArchifyApp {
                             }
                             
                             if total_saved > 0 {
-                                message.push_str(&format!("\n✓ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
+                                message.push_str(&format!("\n✔ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
                             }
                             
-                            message.push_str("\n\nⓘ Tip: Check the Logs tab for detailed information about each failure.");
+                            message.push_str("\n\nℹ Tip: Check the Logs tab for detailed information about each failure.");
                             
                             self.success_message = message;
                         }
                     } else if timeout_elapsed && !has_completion_message {
-                        self.success_message = "✓ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
+                        self.success_message = "✔ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
                     } else {
                         // Calculate total saved space from logs
                         let mut total_saved = 0u64;
@@ -823,11 +844,11 @@ impl ArchifyApp {
                         
                         if total_saved > 0 {
                             self.success_message = format!(
-                                "✓ Binary thinning completed successfully!\n\nTotal space saved: {}",
+                                "✔ Binary thinning completed successfully!\n\nTotal space saved: {}",
                                 FileOperations::human_readable_size(total_saved, 2)
                             );
                         } else {
-                            self.success_message = "✓ Binary thinning completed successfully!".to_string();
+                            self.success_message = "✔ Binary thinning completed successfully!".to_string();
                         }
                     }
                 }
@@ -1032,12 +1053,12 @@ impl ArchifyApp {
         ui.label("Helper Status:");
         if self.helper_status.is_installed {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("✓").size(15.0).color(egui::Color32::GREEN).strong());
+                ui.label(RichText::new("✔").size(15.0).color(egui::Color32::GREEN).strong());
                 ui.label("Installed");
             });
             if self.helper_status.is_running {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✓").size(15.0).color(egui::Color32::GREEN).strong());
+                    ui.label(RichText::new("✔").size(15.0).color(egui::Color32::GREEN).strong());
                     ui.label("Running");
                 });
             } else {
@@ -1338,7 +1359,7 @@ impl ArchifyApp {
             // Developer section with enhanced styling
             ui.group(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("👨‍💻 Developer")
+                    ui.label(egui::RichText::new("💻 Developer")
                         .size(14.0)
                         .color(egui::Color32::from_rgb(149, 165, 166))
                         .strong());
@@ -1352,7 +1373,7 @@ impl ArchifyApp {
             // License section with GPL logo
             ui.group(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("📜 License")
+                    ui.label(egui::RichText::new("🖹 License")
                         .size(14.0)
                         .color(egui::Color32::from_rgb(149, 165, 166))
                         .strong());
@@ -1379,7 +1400,7 @@ impl ArchifyApp {
                         .color(egui::Color32::from_rgb(149, 165, 166))
                         .strong());
                     ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new("🐙")
+                        ui.label(egui::RichText::new(egui::special_emojis::GITHUB.to_string())
                             .size(24.0)
                             .color(egui::Color32::from_rgb(52, 152, 219)));
                         if ui.link(egui::RichText::new("GitHub Repository")
@@ -1579,4 +1600,23 @@ impl Drop for ArchifyApp {
         self.scan_sender = None;
         self.scan_receiver = None;
     }
-} 
+}
+
+fn requires_elevated_permissions(path: &std::path::Path) -> bool {
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("/usr") && !path_str.starts_with("/usr/local") {
+        return true;
+    }
+    if path_str.starts_with("/System") || path_str.starts_with("/Library") || path_str.starts_with("/opt") {
+        return true;
+    }
+    
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() == 0 {
+            return true;
+        }
+    }
+    
+    false
+}
