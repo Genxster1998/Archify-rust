@@ -61,6 +61,13 @@ pub struct ArchifyApp {
     // Icon texture cache for About tab
     pub about_icon_texture: Option<egui::TextureHandle>,
     pub about_gpl_texture: Option<egui::TextureHandle>,
+    // App icons cache
+    pub app_icons: std::collections::HashMap<PathBuf, Option<egui::TextureHandle>>,
+    // Async icon loading channels
+    pub icon_receiver: Option<mpsc::Receiver<(PathBuf, u32, u32, Vec<u8>)>>,
+    pub icon_sender: mpsc::Sender<(PathBuf, u32, u32, Vec<u8>)>,
+    pub loading_icons: std::collections::HashSet<PathBuf>,
+    pub icon_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl ArchifyApp {
@@ -105,6 +112,7 @@ impl ArchifyApp {
         });
         
         let settings = Self::load_settings();
+        let (icon_tx, icon_rx) = mpsc::channel(200);
         
         let mut app = Self {
             selected_tab: 0,
@@ -163,6 +171,11 @@ impl ArchifyApp {
             // Icon texture cache for About tab
             about_icon_texture: None,
             about_gpl_texture: None,
+            app_icons: std::collections::HashMap::new(),
+            icon_receiver: Some(icon_rx),
+            icon_sender: icon_tx,
+            loading_icons: std::collections::HashSet::new(),
+            icon_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
         };
 
         if let Some(s) = settings {
@@ -300,6 +313,30 @@ impl ArchifyApp {
                     }
                 }
                 self.logs.push(log);
+            }
+        }
+    }
+
+    pub fn handle_loaded_icons(&mut self, ctx: &egui::Context) {
+        if let Some(ref mut rx) = self.icon_receiver {
+            while let Ok((path, width, height, pixels)) = rx.try_recv() {
+                self.loading_icons.remove(&path);
+                if pixels.is_empty() {
+                    println!("[DEBUG] Loaded icon failure (None) for {:?}", path);
+                    self.app_icons.insert(path, None);
+                } else {
+                    println!("[DEBUG] Loaded icon success (Some) for {:?}", path);
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize],
+                        &pixels,
+                    );
+                    let texture = ctx.load_texture(
+                        format!("app_icon_{}", path.display()),
+                        color_image,
+                        egui::TextureOptions::default(),
+                    );
+                    self.app_icons.insert(path, Some(texture));
+                }
             }
         }
     }
@@ -940,24 +977,64 @@ impl ArchifyApp {
                     let appstore_filter = !self.show_only_appstore || a.app_source == AppSource::AppStore;
                     universal_filter && appstore_filter
                 }) {
-                    ui.vertical(|ui| {
-                        let mut selected = self.selected_apps.contains(&app_info.path);
-                        if ui.checkbox(&mut selected, &format!("{}", app_info.name)).clicked() {
-                            if selected {
-                                self.selected_apps.push(app_info.path.clone());
-                            } else {
-                                self.selected_apps.retain(|p| p != &app_info.path);
+                    ui.horizontal(|ui| {
+                        // Render App Icon
+                        let icon_cached = self.app_icons.get(&app_info.path);
+                        match icon_cached {
+                            Some(Some(texture)) => {
+                                ui.image((texture.id(), egui::Vec2::splat(64.0)));
+                            }
+                            Some(None) => {
+                                // Failed to load, show fallback
+                                ui.label(egui::RichText::new("📱").size(48.0));
+                            }
+                            None => {
+                                // Not in cache (never tried loading or currently loading)
+                                ui.label(egui::RichText::new("📱").size(48.0));
+                                if !self.loading_icons.contains(&app_info.path) {
+                                    self.loading_icons.insert(app_info.path.clone());
+                                    let path = app_info.path.clone();
+                                    let tx = self.icon_sender.clone();
+                                    let sem = self.icon_semaphore.clone();
+                                    let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
+                                    rt.spawn(async move {
+                                        let _permit = sem.acquire().await;
+                                        let path_clone = path.clone();
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            crate::icon_loader::get_app_icon_rgba(&path_clone, 64)
+                                        }).await;
+                                        if let Ok(Some((width, height, pixels))) = result {
+                                            let _ = tx.send((path, width, height, pixels)).await;
+                                        } else {
+                                            let _ = tx.send((path, 0, 0, Vec::new())).await;
+                                        }
+                                    });
+                                }
                             }
                         }
-                        ui.label(&format!("Type: {:?}", app_info.app_type));
-                        ui.label(&format!("Source: {}", app_info.app_source));
-                        ui.label(&format!("Size: {}", FileOperations::human_readable_size(app_info.total_size, 2)));
-                        ui.label(&format!("Estimated Savable: {}", FileOperations::human_readable_size(app_info.savable_size, 2)));
-                        // Show actual saved space if available (after processing)
-                        if let Some(saved) = crate::types::ProcessingState::default().saved_spaces.get(&app_info.name) {
-                            ui.label(&format!("Actual Saved: {}", FileOperations::human_readable_size(*saved, 2)));
-                        }
-                        ui.label(&format!("Architectures: {:?}", app_info.architectures));
+
+                        ui.add_space(8.0);
+
+                        // Render Checkbox and Details
+                        ui.vertical(|ui| {
+                            let mut selected = self.selected_apps.contains(&app_info.path);
+                            if ui.checkbox(&mut selected, &format!("{}", app_info.name)).clicked() {
+                                if selected {
+                                    self.selected_apps.push(app_info.path.clone());
+                                } else {
+                                    self.selected_apps.retain(|p| p != &app_info.path);
+                                }
+                            }
+                            ui.label(&format!("Type: {:?}", app_info.app_type));
+                            ui.label(&format!("Source: {}", app_info.app_source));
+                            ui.label(&format!("Size: {}", FileOperations::human_readable_size(app_info.total_size, 2)));
+                            ui.label(&format!("Estimated Savable: {}", FileOperations::human_readable_size(app_info.savable_size, 2)));
+                            // Show actual saved space if available (after processing)
+                            if let Some(saved) = crate::types::ProcessingState::default().saved_spaces.get(&app_info.name) {
+                                ui.label(&format!("Actual Saved: {}", FileOperations::human_readable_size(*saved, 2)));
+                            }
+                            ui.label(&format!("Architectures: {:?}", app_info.architectures));
+                        });
                     });
                     ui.end_row();
                 }
@@ -1388,6 +1465,7 @@ impl eframe::App for ArchifyApp {
         let ctx = ui.ctx().clone();
 
         self.handle_scanning_messages();
+        self.handle_loaded_icons(&ctx);
         self.handle_helper_logs();
         self.handle_processing_logs();
         

@@ -5,6 +5,7 @@ pub mod binary_processor;
 pub mod gui;
 pub mod privileged_helper;
 pub mod helper;
+pub mod icon_loader;
 
 #[cfg(test)]
 mod tests {

@@ -79,6 +79,10 @@ ttf-parser = "0.25.1"
 cocoa = "0.25"
 core-foundation = "0.9"
 core-graphics = "0.23" 
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSData", "NSString"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSImage", "NSBitmapImageRep"] }
+objc2-core-graphics = "0.3.2"
 
 [package.metadata.bundle]
 name = "Archify"

@@ -7,6 +7,7 @@ mod binary_processor;
 mod file_operations;
 mod types;
 mod privileged_helper;
+mod icon_loader;
 
 use app::ArchifyApp;
 use std::env;
