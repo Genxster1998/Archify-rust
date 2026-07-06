@@ -2,13 +2,7 @@ use anyhow::{Context, Result};
 use std::env;
 use std::path::Path;
 use std::process::Command;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use shell_words;
 use std::sync::{Arc, Mutex};
-
-const SOCKET_PATH: &str = "/var/run/com.archify.helper.sock";
-
 // Custom logger that writes to both a buffer and stderr
 struct Logger {
     buffer: Arc<Mutex<String>>,
@@ -35,14 +29,7 @@ impl Logger {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    
-    // If run with no arguments (launched by launchd) or explicitly with
-    // "--daemon", run the background daemon that listens on a UNIX socket
-    // for commands.
-    if args.len() == 1 || (args.len() >= 2 && args[1] == "--daemon") {
-        run_daemon().await?;
-        return Ok(());
-    }
+
 
     if args.len() < 2 {
         eprintln!("Usage: {} <command> [options]", args[0]);
@@ -268,88 +255,3 @@ async fn sign_with_ldid(binary_path: &str, logger: &Logger) {
         logger.log(&format!("[HELPER] Warning: ldid not found, skipping signing for: {}", binary_path));
     }
 }
-
-async fn run_daemon() -> Result<()> {
-    // Remove any stale socket file
-    let _ = std::fs::remove_file(SOCKET_PATH);
-
-    let listener = UnixListener::bind(SOCKET_PATH)
-        .context("Failed to bind unix socket for helper daemon")?;
-
-    // Ensure correct permissions so regular (staff) users can reach it.
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(SOCKET_PATH, std::fs::Permissions::from_mode(0o660)).ok();
-
-    // If the primary group is staff (gid 20) change the socket group to staff
-    unsafe {
-        use std::ffi::CString;
-        let cpath = CString::new(SOCKET_PATH).unwrap();
-        let gid_staff: libc::gid_t = 20;
-        // root user id is 0
-        libc::chown(cpath.as_ptr(), 0, gid_staff);
-    }
-
-    eprintln!("[HELPER] Daemon started, listening on {}", SOCKET_PATH);
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(stream).await {
-                eprintln!("[HELPER] client error: {}", e);
-            }
-        });
-    }
-}
-
-async fn handle_client(stream: UnixStream) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-
-    // Expect a single line command like: thin <path> <arch> [--no-sign] [--use-codesign]
-    let bytes = reader.read_line(&mut line).await?;
-    if bytes == 0 {
-        return Ok(());
-    }
-
-    // Use shell_words to properly parse quoted arguments
-    let parts = match shell_words::split(line.trim()) {
-        Ok(parts) => parts,
-        Err(e) => {
-            let msg = format!("ERR Argument parse error: {}\n", e);
-            writer.write_all(msg.as_bytes()).await?;
-            return Ok(());
-        }
-    };
-    if parts.is_empty() {
-        writer.write_all(b"ERR Empty command\n").await?;
-        return Ok(());
-    }
-
-    match parts[0].as_str() {
-        "thin" => {
-            if parts.len() < 3 {
-                writer.write_all(b"ERR Usage: thin <app_path> <arch> [--no-sign] [--use-codesign]\n").await?;
-            } else {
-                let app_path = &parts[1];
-                let arch = &parts[2];
-                let no_sign = parts.iter().any(|s| s == "--no-sign");
-                let use_codesign = parts.iter().any(|s| s == "--use-codesign");
-                let logger = Logger::new();
-                let result = thin_app(app_path, arch, no_sign, use_codesign, &logger).await;
-                let log_str = logger.get_logs();
-                if let Err(e) = result {
-                    let msg = format!("ERR {}\n{}", e, log_str);
-                    writer.write_all(msg.as_bytes()).await?;
-                } else {
-                    let msg = format!("OK\n{}", log_str);
-                    writer.write_all(msg.as_bytes()).await?;
-                }
-            }
-        }
-        _ => {
-            writer.write_all(b"ERR Unknown command\n").await?;
-        }
-    }
-    Ok(())
-} 

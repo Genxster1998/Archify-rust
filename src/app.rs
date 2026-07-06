@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::runtime::Runtime;
 use rfd::FileDialog;
-use crate::privileged_helper::{PrivilegedHelper, HelperStatus};
+use crate::privileged_helper::PrivilegedHelper;
 use std::sync::OnceLock;
 use image;
 use dirs;
@@ -47,8 +47,6 @@ pub struct ArchifyApp {
     pub user_apps: Vec<PathBuf>,
     pub elevated_confirmed: bool,
     // Helper status
-    pub helper_status: HelperStatus,
-    pub show_helper_install_dialog: bool,
     pub helper_log_receiver: Option<mpsc::Receiver<LogMessage>>,
     pub processing_log_receiver: Option<mpsc::Receiver<LogMessage>>,
     // Success dialog state
@@ -151,13 +149,6 @@ impl ArchifyApp {
             user_apps: Vec::new(),
             elevated_confirmed: false,
             // Helper status
-            helper_status: HelperStatus {
-                is_installed: false,
-                is_running: false,
-                version: None,
-                error: None,
-            },
-            show_helper_install_dialog: false,
             helper_log_receiver: None,
             processing_log_receiver: None,
             // Success dialog state
@@ -389,25 +380,16 @@ impl ArchifyApp {
         self.elevated_confirmed = true;
 
         if !self.elevated_apps.is_empty() {
-            if !PrivilegedHelper::is_installed() {
-                let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
-                rt.spawn(async move {
-                    if let Err(e) = PrivilegedHelper::install_helper().await {
-                        eprintln!("Failed to install privileged helper: {}", e);
-                    }
-                });
-                self.add_log(LogLevel::Warning, "Installing privileged helper...".to_string());
-            } else {
-                // Set processing flags for success dialog
-                self.is_processing = true;
-                self.was_processing = true;
-                self.processing_start_time = Some(std::time::Instant::now());
-                
-                let (log_tx, log_rx) = mpsc::channel(100);
-                self.helper_log_receiver = Some(log_rx);
-                
-                let elevated_apps_count = self.elevated_apps.len();
-                let (completion_tx, mut completion_rx) = mpsc::channel(100);
+            // Set processing flags for success dialog
+            self.is_processing = true;
+            self.was_processing = true;
+            self.processing_start_time = Some(std::time::Instant::now());
+            
+            let (log_tx, log_rx) = mpsc::channel(100);
+            self.helper_log_receiver = Some(log_rx);
+            
+            let elevated_apps_count = self.elevated_apps.len();
+            let (completion_tx, mut completion_rx) = mpsc::channel(100);
                 
                 for app_path in &self.elevated_apps {
                     let app_path = app_path.clone();
@@ -473,7 +455,6 @@ impl ArchifyApp {
                     }
                 });
                 drop(log_tx);
-            }
         }
         self.process_apps_with_permissions(self.user_apps.clone(), false);
         self.elevated_apps.clear();
@@ -680,10 +661,6 @@ impl ArchifyApp {
         
         (failed_apps, total_saved)
     }
-
-    fn update_helper_status(&mut self) {
-        self.helper_status = PrivilegedHelper::get_helper_status();
-        }
 
     pub fn handle_helper_logs(&mut self) {
         if let Some(ref mut rx) = self.helper_log_receiver {
@@ -1043,96 +1020,7 @@ impl ArchifyApp {
             ui.add(egui::Slider::new(&mut self.scan_depth, 1..=8));
         });
 
-        ui.separator();
-        ui.heading("Privileged Helper");
-        
-        // Update helper status
-        self.update_helper_status();
-        
-        // Display helper status
-        ui.label("Helper Status:");
-        if self.helper_status.is_installed {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("✔").size(15.0).color(egui::Color32::GREEN).strong());
-                ui.label("Installed");
-            });
-            if self.helper_status.is_running {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("✔").size(15.0).color(egui::Color32::GREEN).strong());
-                    ui.label("Running");
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠").size(15.0).color(egui::Color32::YELLOW).strong());
-                    ui.label("Not Running");
-                });
-            }
-            if let Some(version) = &self.helper_status.version {
-                ui.label(format!("Version: {}", version));
-            }
-        } else {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("×").size(18.0).color(egui::Color32::RED).strong());
-                ui.label("Not Installed");
-            });
-            if let Some(error) = &self.helper_status.error {
-                ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
-            }
-        }
-        
-        ui.separator();
-        
-        // Helper management buttons
-        ui.horizontal(|ui| {
-            if ui.button("Install Helper").clicked() {
-                self.show_helper_install_dialog = true;
-            }
-            
-            if self.helper_status.is_installed && ui.button("Uninstall Helper").clicked() {
-                let runtime = RUNTIME.get().expect("Runtime not initialized");
-                runtime.spawn(async {
-                    if let Err(e) = PrivilegedHelper::uninstall_helper().await {
-                        eprintln!("Failed to uninstall helper: {}", e);
-                    }
-                });
-            }
-        });
-        
-        if self.show_helper_install_dialog {
-            egui::Window::new("Install Privileged Helper")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.heading("Install Privileged Helper");
-                    ui.label("The privileged helper is required to thin applications that require elevated permissions.");
-                    ui.label("This will install a system service that runs with root privileges.");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("⚠").size(16.0).color(egui::Color32::YELLOW).strong());
-                        ui.label(RichText::new("Security Note:").strong());
-                    });
-                    ui.label("• The helper will be installed in /Library/PrivilegedHelperTools/");
-                    ui.label("• It will run as a system service with root privileges");
-                    ui.label("• You will be prompted for your administrator password");
-                    ui.separator();
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Install").clicked() {
-                            let runtime = RUNTIME.get().expect("Runtime not initialized");
-                            runtime.spawn(async {
-                                if let Err(e) = PrivilegedHelper::install_helper().await {
-                                    eprintln!("Failed to install helper: {}", e);
-                                }
-                            });
-                            self.show_helper_install_dialog = false;
-                        }
-                        
-                        if ui.button("Cancel").clicked() {
-                            self.show_helper_install_dialog = false;
-                        }
-                    });
-                });
-        }
+
 
         ui.separator();
         if ui.button("Save Settings").clicked() {
@@ -1603,20 +1491,15 @@ impl Drop for ArchifyApp {
 }
 
 fn requires_elevated_permissions(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy();
-    if path_str.starts_with("/usr") && !path_str.starts_with("/usr/local") {
-        return true;
-    }
-    if path_str.starts_with("/System") || path_str.starts_with("/Library") || path_str.starts_with("/opt") {
-        return true;
-    }
-    
-    if let Ok(metadata) = std::fs::metadata(path) {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() == 0 {
-            return true;
+    use std::ffi::CString;
+    if let Some(path_str) = path.to_str() {
+        if let Ok(c_path) = CString::new(path_str) {
+            unsafe {
+                if libc::access(c_path.as_ptr(), libc::W_OK) != 0 {
+                    return true;
+                }
+            }
         }
     }
-    
     false
 }

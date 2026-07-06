@@ -57,14 +57,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-print_status "Building SMJobBless installer..."
-make
-
-if [ $? -ne 0 ]; then
-    print_error "Failed to build smjobbless_installer"
-    exit 1
-fi
-
 print_status "Creating app bundle..."
 cargo bundle --release
 
@@ -73,12 +65,10 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Correct macOS bundle layout for privileged helper
+# Copy helper binary to MacOS directory
 APP_BUNDLE="target/release/bundle/osx/Archify.app"
-LAUNCHSERVICES_DIR="$APP_BUNDLE/Contents/Library/LaunchServices"
+MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 HELPER_SOURCE="target/release/helper"
-HELPER_PLIST_SOURCE="helper/com.archify.helper.plist"
-INSTALLER_SOURCE="smjobbless_installer"
 
 if [ ! -f "$HELPER_SOURCE" ]; then
     print_error "Helper binary not found at $HELPER_SOURCE"
@@ -90,21 +80,10 @@ if [ ! -d "$APP_BUNDLE" ]; then
     exit 1
 fi
 
-if [ ! -f "$INSTALLER_SOURCE" ]; then
-    print_error "smjobbless_installer not found. Did make succeed?"
-    exit 1
-fi
+cp "$HELPER_SOURCE" "$MACOS_DIR/helper"
+chmod +x "$MACOS_DIR/helper"
 
-mkdir -p "$LAUNCHSERVICES_DIR"
-
-# Copy helper binary, plist, and installer to LaunchServices
-cp "$HELPER_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper"
-cp "$HELPER_PLIST_SOURCE" "$LAUNCHSERVICES_DIR/com.archify.helper.plist"
-cp "$INSTALLER_SOURCE" "$LAUNCHSERVICES_DIR/smjobbless_installer"
-chmod +x "$LAUNCHSERVICES_DIR/com.archify.helper"
-chmod +x "$LAUNCHSERVICES_DIR/smjobbless_installer"
-
-print_status "Helper binary, plist, and installer copied to: $LAUNCHSERVICES_DIR"
+print_status "Helper binary copied to: $MACOS_DIR"
 
 # Optional: Sign the app bundle (if you have a developer certificate)
 if command -v codesign &> /dev/null; then
