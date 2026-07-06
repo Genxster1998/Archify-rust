@@ -84,8 +84,12 @@ core-graphics = "0.23"
 name = "Archify"
 identifier = "com.archify.app"
 icon = ["assets/icon.icns"]
-resources = [
-  "helper/com.archify.helper.launchd.plist"
-]
 category = "public.app-category.utilities"
-copyright = "GPL-3.0" 
+copyright = "GPL-3.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true 
