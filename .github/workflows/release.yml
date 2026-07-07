@@ -296,7 +296,6 @@ jobs:
           
           # Create universal directory
           mkdir -p target/universal/Archify.app/Contents/MacOS
-          mkdir -p target/universal/Archify.app/Contents/Library/LaunchServices
           
           # Copy x86_64 app bundle structure
           cp -r "$APP_BUNDLE_PATH"/* target/universal/Archify.app/
@@ -311,7 +310,7 @@ jobs:
           lipo -create \
             "x86_64-binaries/helper" \
             "arm64-binaries/helper" \
-            -output "target/universal/Archify.app/Contents/Library/LaunchServices/com.archify.helper"
+            -output "target/universal/Archify.app/Contents/MacOS/helper"
           
           echo "Universal binary created"
 
