@@ -1,35 +1,39 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/assets/icon.png" width="128" height="128" alt="Archify Logo">
+</p>
+
 # Archify Rust
 
-A modern Rust implementation of Archify for removing ARM64e/ARM64 code from macOS universal binaries. This tool helps reduce disk space usage by removing unnecessary architectures from applications.
+A modern Rust implementation of Archify for removing unnecessary ARM64e/ARM64 code from macOS universal binaries. This tool helps reduce disk space usage by removing unwanted architectures from applications.
 
 ## Features
 
-### Core Functionality
-- **Universal Binary Detection**: Fast detection using the `goblin` crate
-- **Accurate Size Calculation**: Uses `lipo -detailed_info` for precise savable space estimation
-- **Parallel Processing**: Utilizes all available CPU cores for faster processing
-- **App Source Detection**: Automatically detects App Store vs user-installed applications
-- **In-Place Thinning**: Modifies applications directly without creating copies
+- **Reclaim Disk Space**: Easily remove unused binary architectures (like `x86_64` or `arm64e`) from macOS applications to free up gigabytes of storage.
+- **Smart App Detection**: Scans your `/Applications` directory to identify universal binaries, displaying the exact amount of space you can save.
+- **On-Demand Elevation**: Prompts for administrative privileges only when processing system apps.
+- **Modern User Interface**: A native, responsive macOS application list with crisp high-DPI icons and a real-time progress log.
+- **Flexible Processing**: Thin multiple applications at once, filter by App Store downloads, or process custom files and folders outside standard directories.
+- **Safety First**: Only modifies fat binaries in place and automatically signs them afterward to ensure they run correctly on your Mac.
 
-### Modern Architecture
-- **Rust Binary Helper**: Replaces bash scripts with a robust Rust binary for privileged operations
-- **GUI Installation**: Modern GUI prompts for installing the privileged helper (no terminal required)
-- **Proper App Bundle**: Uses `cargo-bundle` to create a proper macOS `.app` bundle
-- **Entitlements Support**: Proper entitlements and launchd plist for system integration
+## Screenshots
 
-### User Interface
-- **Modern GUI**: Built with `egui` for a native macOS experience
-- **Batch Processing**: Select multiple applications for processing
-- **Real-time Logging**: Live progress updates and detailed logging
-- **App Filtering**: Filter by universal binaries, App Store apps, etc.
-- **Manual Thinning**: Select individual `.app` bundles for processing
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR1.png" width="800" alt="Main Scan Screen">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR2.png" width="800" alt="Scanning Progress">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR3.png" width="800" alt="Detailed Processing Logs">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR4.png" width="800" alt="Settings Configuration">
+</p>
+
+---
 
 ## Installation
 
 ### Prerequisites
-- macOS 10.15 or later
-- Rust 1.70+ and Cargo
-- Administrator privileges (for installing the helper)
+- macOS 10.15 or later.
+- Administrator privileges (prompted on-demand when processing protected system folders like `/Applications`).
 
 ### Building from Source
 
@@ -44,12 +48,6 @@ A modern Rust implementation of Archify for removing ARM64e/ARM64 code from macO
    ./build.sh
    ```
 
-   This will:
-   - Build the main application
-   - Build the privileged helper binary
-   - Create a proper macOS `.app` bundle
-   - Bundle the helper binary and plist files
-
 3. **Install the app bundle**:
    ```bash
    # Copy to Applications folder
@@ -59,92 +57,41 @@ A modern Rust implementation of Archify for removing ARM64e/ARM64 code from macO
    open target/release/bundle/osx/Archify.app
    ```
 
-### First Run Setup
-
-1. **Launch the application** from Applications or the build directory
-2. **Install the Privileged Helper**:
-   - Go to the Settings tab
-   - Click "Install Helper" in the Privileged Helper section
-   - Enter your administrator password when prompted
-   - The helper will be installed as a system service
+---
 
 ## Usage
 
 ### GUI Mode (Recommended)
 
-1. **Launch Archify Rust**
+1. **Launch Archify** from Applications or your build directory.
 2. **Scan Applications**:
-   - Click "Scan Applications" to find apps in `/Applications`
-   - Add custom directories in Settings if needed
-   - Use filters to show only universal binaries or App Store apps
+   - Click "Scan Applications" to discover fat binaries in `/Applications`.
+   - Add custom scan directories in Settings.
+   - Toggle filters to only list Universal/Fat binaries or Mac App Store apps.
+3. **Select & Estimate**:
+   - Check the apps you want to thin.
+   - Review the calculated total size and estimated savable space.
+4. **Process**:
+   - Click "Process Selected".
+   - If any chosen app is in a protected system folder, macOS will display a single prompt requesting your administrator password.
+   - Monitor detailed, step-by-step progress under the **Logs** tab.
 
-3. **Select Applications**:
-   - Check the applications you want to thin
-   - Use "Select All" to select all visible apps
-   - Review the estimated savable space
+### Manual Thinning Tab
+For binaries located outside scanned paths:
+1. Navigate to the **Manual Thinning** tab.
+2. Drag or select individual `.app` bundles.
+3. Click "Process Selected Binaries".
 
-4. **Process Applications**:
-   - Click "Process Selected Apps"
-   - The app will automatically handle permission requirements
-   - Monitor progress in the Logs tab
-
-### Manual Thinning
-
-1. **Go to Manual Thinning tab**
-2. **Select .app bundles** from any location
-3. **Click "Process Selected Apps"**
-
-### Batch Processing
-
-For advanced users, you can also use the CLI mode:
-
-```bash
-# Process apps with elevated permissions
-sudo ./target/release/archify-rust --batch-elevated /path/to/app1.app /path/to/app2.app
-```
-
-## Security
-
-### Privileged Helper
-- Runs as a system service with root privileges
-- Installed in `/Library/PrivilegedHelperTools/`
-- Uses launchd for service management
-- Proper entitlements and code signing support
-
-### Permissions
-- **User Apps**: Processed with user permissions
-- **System/App Store Apps**: Require elevated permissions
-- **Automatic Detection**: App source determines permission requirements
+---
 
 ## Configuration
 
 ### Settings Tab
-- **Target Architecture**: Choose x86_64, arm64, or arm64e
-- **Signing Options**: Use codesign or ldid for binary signing
-- **Batch Processing**: Configure parallel processing and logging
-- **Scan Locations**: Add custom directories for app discovery
+- **Target Architecture**: Choose between `x86_64`, `arm64`, or `arm64e`.
+- **Signing Options**: Choose `codesign` or `ldid` to automatically resign thinned binaries.
+- **Scan Locations**: Add or remove custom folders to include in searches.
 
-### Helper Management
-- **Install/Uninstall**: Manage the privileged helper
-- **Status Monitoring**: Check if helper is installed and running
-- **Version Information**: Display helper version and status
-
-## Troubleshooting
-
-### Helper Installation Issues
-- Ensure you have administrator privileges
-- Check that the app bundle is properly built
-- Verify the helper binary exists in the app bundle resources
-
-### Processing Failures
-- Check the Logs tab for detailed error messages
-- Ensure the helper is installed and running
-- Verify target applications are not in use
-
-### Build Issues
-- Ensure Rust and Cargo are up to date
-- Install `cargo-bundle` if not already installed
-- Check that all dependencies are available
+---
 
 ## Development
 
@@ -153,33 +100,18 @@ sudo ./target/release/archify-rust --batch-elevated /path/to/app1.app /path/to/a
 archify-rust/
 ├── src/
 │   ├── main.rs              # Main application entry point
-│   ├── app.rs               # GUI application logic
-│   ├── bin/helper.rs        # Privileged helper binary
-│   ├── file_operations.rs   # Core file processing
-│   ├── privileged_helper.rs # Helper management
-│   ├── types.rs             # Data structures
-│   └── gui.rs               # GUI components
-├── helper/
-│   ├── com.archify.helper.plist        # Helper entitlements
-│   └── com.archify.helper.launchd.plist # Launchd service plist
-├── build.sh                 # Build script
-└── Cargo.toml              # Project configuration
+│   ├── app.rs               # GUI application layout and logic
+│   ├── bin/helper.rs        # Privileged helper CLI binary
+│   ├── file_operations.rs   # Universal binary detection and local file operations
+│   ├── privileged_helper.rs # Elevated on-demand script wrapping (osascript)
+│   ├── types.rs             # Data structures and enums
+│   └── icon_loader.rs       # Native Cocoa high-DPI icon loader (Retina support)
+├── assets/                  # PNG and ICNS graphics assets
+├── build.sh                 # Unified build and packaging script
+└── Cargo.toml              # Cargo crate configuration
 ```
 
-### Building
-```bash
-# Build everything
-./build.sh
-
-# Build just the helper
-cargo build --release --bin helper
-
-# Build just the main app
-cargo build --release
-
-# Create app bundle
-cargo bundle --release
-```
+---
 
 ## License
 
@@ -187,7 +119,8 @@ This project is licensed under the GPL-3.0 License - see the LICENSE file for de
 
 ## Acknowledgments
 
-- Original Archify project for the concept and approach
-- `goblin` crate for fast Mach-O parsing
-- `egui` for the modern GUI framework
-- `cargo-bundle` for proper macOS app bundling 
+- Original Archify project for the concept and approach.
+- `goblin` crate for fast Mach-O parsing.
+- `egui` and `eframe` for the GUI framework.
+- `objc2` for type-safe native Apple Cocoa bindings.
+- `cargo-bundle` for macOS app bundle staging.
