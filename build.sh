@@ -85,6 +85,20 @@ chmod +x "$MACOS_DIR/helper"
 
 print_status "Helper binary copied to: $MACOS_DIR"
 
+# Copy manually provided icon.icns into Resources and update Info.plist
+RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
+mkdir -p "$RESOURCES_DIR"
+
+if [ -f "assets/icon.icns" ]; then
+    print_status "Copying assets/icon.icns to Resources..."
+    cp "assets/icon.icns" "$RESOURCES_DIR/Archify.icns"
+    plutil -replace CFBundleIconFile -string "Archify.icns" "$APP_BUNDLE/Contents/Info.plist"
+elif [ -f "assets/icon.png" ]; then
+    print_warning "assets/icon.icns not found, copying icon.png as fallback..."
+    cp "assets/icon.png" "$RESOURCES_DIR/Archify.png"
+    plutil -replace CFBundleIconFile -string "Archify.png" "$APP_BUNDLE/Contents/Info.plist"
+fi
+
 # Optional: Sign the app bundle (if you have a developer certificate)
 if command -v codesign &> /dev/null; then
     print_warning "To sign the app bundle, run:"

@@ -425,73 +425,51 @@ impl ArchifyApp {
             let (log_tx, log_rx) = mpsc::channel(100);
             self.helper_log_receiver = Some(log_rx);
             
-            let elevated_apps_count = self.elevated_apps.len();
-            let (completion_tx, mut completion_rx) = mpsc::channel(100);
-                
-                for app_path in &self.elevated_apps {
-                    let app_path = app_path.clone();
-                    let config = self.processing_config.clone();
-                    let log_tx = log_tx.clone();
-                    let completion_tx = completion_tx.clone();
-                    let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
-                    rt.spawn(async move {
-                        match PrivilegedHelper::thin_app(
-                            &app_path,
-                            &config.target_architecture,
-                            config.no_sign,
-                            config.no_entitlements,
-                            config.use_codesign,
-                        ).await {
-                            Ok((status, log_lines)) => {
-                                // Print summary to terminal
-                                println!("Successfully thinned {}: {}", app_path.display(), status);
-                                let _ = log_tx.send(LogMessage {
-                                    timestamp: chrono::Utc::now(),
-                                    level: LogLevel::Info,
-                                    message: format!("Successfully thinned {}: {}", app_path.display(), status),
-                                }).await;
-                                for line in log_lines {
-                                    let _ = log_tx.send(LogMessage {
-                                        timestamp: chrono::Utc::now(),
-                                        level: LogLevel::Info,
-                                        message: line,
-                                    }).await;
-                                }
-                            }
-                            Err(e) => {
-                                // Print summary to terminal
-                                eprintln!("Failed to thin {}: {}", app_path.display(), e);
-                                let _ = log_tx.send(LogMessage {
-                                    timestamp: chrono::Utc::now(),
-                                    level: LogLevel::Error,
-                                    message: format!("Failed to thin {}: {}", app_path.display(), e),
-                                }).await;
-                            }
-                        }
-                        
-                        // Signal completion
-                        let _ = completion_tx.send(()).await;
-                    });
-                }
-                
-                // Spawn a task to send completion message when all apps are done
-                let log_tx_final = log_tx.clone();
-                let rt_final = RUNTIME.get().expect("Runtime not initialized").handle().clone();
-                rt_final.spawn(async move {
-                    let mut completed = 0;
-                    while let Some(_) = completion_rx.recv().await {
-                        completed += 1;
-                        if completed >= elevated_apps_count {
-                            let _ = log_tx_final.send(LogMessage {
+            let elevated_apps = self.elevated_apps.clone();
+            let config = self.processing_config.clone();
+            let log_tx_spawn = log_tx.clone();
+            let rt = RUNTIME.get().expect("Runtime not initialized").handle().clone();
+            rt.spawn(async move {
+                match PrivilegedHelper::thin_apps(
+                    &elevated_apps,
+                    &config.target_architecture,
+                    config.no_sign,
+                    config.no_entitlements,
+                    config.use_codesign,
+                ).await {
+                    Ok((status, log_lines)) => {
+                        println!("Successfully thinned all elevated apps: {}", status);
+                        let _ = log_tx_spawn.send(LogMessage {
+                            timestamp: chrono::Utc::now(),
+                            level: LogLevel::Info,
+                            message: format!("Successfully thinned all elevated apps: {}", status),
+                        }).await;
+                        for line in log_lines {
+                            let _ = log_tx_spawn.send(LogMessage {
                                 timestamp: chrono::Utc::now(),
-                                level: LogLevel::Success,
-                                message: "Elevated processing completed".to_string(),
+                                level: LogLevel::Info,
+                                message: line,
                             }).await;
-                            break;
                         }
                     }
-                });
-                drop(log_tx);
+                    Err(e) => {
+                        eprintln!("Failed to thin elevated apps: {}", e);
+                        let _ = log_tx_spawn.send(LogMessage {
+                            timestamp: chrono::Utc::now(),
+                            level: LogLevel::Error,
+                            message: format!("Failed to thin elevated apps: {}", e),
+                        }).await;
+                    }
+                }
+                
+                // Signal completion
+                let _ = log_tx_spawn.send(LogMessage {
+                    timestamp: chrono::Utc::now(),
+                    level: LogLevel::Success,
+                    message: "Elevated processing completed".to_string(),
+                }).await;
+            });
+            drop(log_tx);
         }
         self.process_apps_with_permissions(self.user_apps.clone(), false);
         self.elevated_apps.clear();
@@ -904,11 +882,6 @@ impl ArchifyApp {
                 self.process_selected_apps();
             }
             
-            if self.is_scanning {
-                ui.spinner();
-                ui.label("Scanning...");
-            }
-            
             if self.is_processing {
                 ui.label("Processing...");
             }
@@ -1001,7 +974,7 @@ impl ArchifyApp {
                                         let _permit = sem.acquire().await;
                                         let path_clone = path.clone();
                                         let result = tokio::task::spawn_blocking(move || {
-                                            crate::icon_loader::get_app_icon_rgba(&path_clone, 64)
+                                            crate::icon_loader::get_app_icon_rgba(&path_clone, 128)
                                         }).await;
                                         if let Ok(Some((width, height, pixels))) = result {
                                             let _ = tx.send((path, width, height, pixels)).await;

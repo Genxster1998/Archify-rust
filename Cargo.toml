@@ -87,7 +87,7 @@ objc2-core-graphics = "0.3.2"
 [package.metadata.bundle]
 name = "Archify"
 identifier = "com.archify.app"
-icon = ["assets/icon.icns"]
+# icon = ["assets/icon.png"]
 category = "public.app-category.utilities"
 copyright = "GPL-3.0"
 

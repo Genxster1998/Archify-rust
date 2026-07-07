@@ -1,13 +1,13 @@
-use std::path::Path;
+use std::path::PathBuf;
 use tokio::process::Command;
 use anyhow::{Context, Result};
 
 pub struct PrivilegedHelper;
 
 impl PrivilegedHelper {
-    /// Thin an app using the privileged helper via osascript
-    pub async fn thin_app(
-        app_path: &Path,
+    /// Thin multiple apps in a single elevated session using osascript
+    pub async fn thin_apps(
+        app_paths: &[PathBuf],
         target_arch: &str,
         no_sign: bool,
         _no_entitlements: bool,
@@ -20,22 +20,29 @@ impl PrivilegedHelper {
             return Err(anyhow::anyhow!("Helper binary not found at {:?}", helper_path));
         }
 
-        let mut cmd_args = vec![
-            "thin".to_string(),
-            format!("'{}'", app_path.to_string_lossy().replace("'", "'\\''")),
-            target_arch.to_string(),
-        ];
-        if no_sign {
-            cmd_args.push("--no-sign".to_string());
-        }
-        if use_codesign {
-            cmd_args.push("--use-codesign".to_string());
+        let helper_str = helper_path.to_string_lossy().replace("'", "'\\''");
+        let mut commands = Vec::new();
+
+        for app_path in app_paths {
+            let app_str = app_path.to_string_lossy().replace("'", "'\\''");
+            let mut cmd = format!("'{}' thin '{}' {}", helper_str, app_str, target_arch);
+            if no_sign {
+                cmd.push_str(" --no-sign");
+            }
+            if use_codesign {
+                cmd.push_str(" --use-codesign");
+            }
+            commands.push(cmd);
         }
 
+        // Run all commands sequentially, separating them with semicolons
+        // so that they all execute even if one fails.
+        // Wrap everything in a subshell and redirect stderr to stdout to capture all outputs.
+        let shell_command = format!("( {} ) 2>&1", commands.join(" ; "));
+
         let script = format!(
-            "do shell script \"'{}' {} 2>&1\" with administrator privileges",
-            helper_path.to_string_lossy().replace("'", "'\\''"),
-            cmd_args.join(" ")
+            "do shell script \"{}\" with administrator privileges",
+            shell_command.replace("\"", "\\\"")
         );
 
         let output = Command::new("osascript")
