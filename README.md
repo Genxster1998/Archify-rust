@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/assets/icon.png" width="128" height="128" alt="Archify Logo">
+  <img src="https://raw.githubusercontent.com/Genxster1998/Archify-rust/master/assets/icon.png" width="128" height="128" alt="Archify Logo">
 </p>
 
 # Archify Rust
@@ -18,13 +18,13 @@ A modern Rust implementation of Archify for removing unnecessary ARM64e/ARM64 co
 ## Screenshots
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR1.png" width="800" alt="Main Scan Screen">
+  <img src="https://raw.githubusercontent.com/Genxster1998/Archify-rust/master/screenshots/SCR1.png" width="800" alt="Main Scan Screen">
   <br><br>
-  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR2.png" width="800" alt="Scanning Progress">
+  <img src="https://raw.githubusercontent.com/Genxster1998/Archify-rust/master/screenshots/SCR2.png" width="800" alt="Scanning Progress">
   <br><br>
-  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR3.png" width="800" alt="Detailed Processing Logs">
+  <img src="https://raw.githubusercontent.com/Genxster1998/Archify-rust/master/screenshots/SCR3.png" width="800" alt="Detailed Processing Logs">
   <br><br>
-  <img src="https://raw.githubusercontent.com/Genxster1998/archify-rust/main/screenshots/SCR4.png" width="800" alt="Settings Configuration">
+  <img src="https://raw.githubusercontent.com/Genxster1998/Archify-rust/master/screenshots/SCR4.png" width="800" alt="Settings Configuration">
 </p>
 
 ---
