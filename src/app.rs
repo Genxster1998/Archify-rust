@@ -68,6 +68,8 @@ pub struct ArchifyApp {
     pub icon_sender: mpsc::Sender<(PathBuf, u32, u32, Vec<u8>)>,
     pub loading_icons: std::collections::HashSet<PathBuf>,
     pub icon_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    pub dark_mode: Option<bool>,
+    pub theme_initialized: Option<bool>,
 }
 
 impl ArchifyApp {
@@ -96,6 +98,7 @@ impl ArchifyApp {
                 scan_depth: self.scan_depth,
                 show_only_universal: self.show_only_universal,
                 show_only_appstore: self.show_only_appstore,
+                dark_mode: self.dark_mode,
             };
             if let Ok(json) = serde_json::to_string_pretty(&settings) {
                 let _ = std::fs::write(path, json);
@@ -176,6 +179,8 @@ impl ArchifyApp {
             icon_sender: icon_tx,
             loading_icons: std::collections::HashSet::new(),
             icon_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+            dark_mode: None,
+            theme_initialized: None,
         };
 
         if let Some(s) = settings {
@@ -185,6 +190,7 @@ impl ArchifyApp {
             app.scan_depth = s.scan_depth;
             app.show_only_universal = s.show_only_universal;
             app.show_only_appstore = s.show_only_appstore;
+            app.dark_mode = s.dark_mode;
         }
 
         app
@@ -1437,6 +1443,17 @@ impl eframe::App for ArchifyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // Initialize theme on first frame
+        if self.theme_initialized.is_none() {
+            let is_dark = self.dark_mode.unwrap_or(true);
+            if is_dark {
+                ctx.set_visuals(egui::Visuals::dark());
+            } else {
+                ctx.set_visuals(egui::Visuals::light());
+            }
+            self.theme_initialized = Some(true);
+        }
+
         self.handle_scanning_messages();
         self.handle_loaded_icons(&ctx);
         self.handle_helper_logs();
@@ -1449,6 +1466,22 @@ impl eframe::App for ArchifyApp {
             ui.selectable_value(&mut self.selected_tab, 2, "Logs");
             ui.selectable_value(&mut self.selected_tab, 3, "Manual");
             ui.selectable_value(&mut self.selected_tab, 4, "About");
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let is_dark = ui.style().visuals.dark_mode;
+                let icon = if is_dark { "☀️" } else { "🌙" };
+                let tooltip = if is_dark { "Switch to Light Theme" } else { "Switch to Dark Theme" };
+                if ui.button(icon).on_hover_text(tooltip).clicked() {
+                    let new_dark = !is_dark;
+                    self.dark_mode = Some(new_dark);
+                    if new_dark {
+                        ctx.set_visuals(egui::Visuals::dark());
+                    } else {
+                        ctx.set_visuals(egui::Visuals::light());
+                    }
+                    self.save_settings();
+                }
+            });
         });
         
         ui.separator();

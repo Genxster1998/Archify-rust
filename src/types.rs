@@ -198,4 +198,5 @@ pub struct UserSettings {
     pub scan_depth: usize,
     pub show_only_universal: bool,
     pub show_only_appstore: bool,
+    pub dark_mode: Option<bool>,
 } 
