@@ -1095,7 +1095,7 @@ impl ArchifyApp {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for log in &self.logs {
                 let color = match log.level {
-                    LogLevel::Info => egui::Color32::WHITE,
+                    LogLevel::Info => ui.visuals().text_color(),
                     LogLevel::Warning => egui::Color32::YELLOW,
                     LogLevel::Error => egui::Color32::RED,
                     LogLevel::Success => egui::Color32::GREEN,
@@ -1459,51 +1459,65 @@ impl eframe::App for ArchifyApp {
         self.handle_helper_logs();
         self.handle_processing_logs();
         
-        // Tabs
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.selected_tab, 0, "Applications");
-            ui.selectable_value(&mut self.selected_tab, 1, "Settings");
-            ui.selectable_value(&mut self.selected_tab, 2, "Logs");
-            ui.selectable_value(&mut self.selected_tab, 3, "Manual");
-            ui.selectable_value(&mut self.selected_tab, 4, "About");
+        egui::CentralPanel::default().show(ui, |ui| {
+            // Ensure the panel's ui uses the updated visuals immediately on first frame
+            if let Some(is_dark) = self.dark_mode {
+                let visuals = if is_dark {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                };
+                ui.style_mut().visuals = visuals;
+            }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let is_dark = ui.style().visuals.dark_mode;
-                let icon = if is_dark { "☀️" } else { "🌙" };
-                let tooltip = if is_dark { "Switch to Light Theme" } else { "Switch to Dark Theme" };
-                if ui.button(icon).on_hover_text(tooltip).clicked() {
-                    let new_dark = !is_dark;
-                    self.dark_mode = Some(new_dark);
-                    if new_dark {
-                        ctx.set_visuals(egui::Visuals::dark());
-                    } else {
-                        ctx.set_visuals(egui::Visuals::light());
+            // Tabs
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.selected_tab, 0, "Applications");
+                ui.selectable_value(&mut self.selected_tab, 1, "Settings");
+                ui.selectable_value(&mut self.selected_tab, 2, "Logs");
+                ui.selectable_value(&mut self.selected_tab, 3, "Manual");
+                ui.selectable_value(&mut self.selected_tab, 4, "About");
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let is_dark = ui.style().visuals.dark_mode;
+                    let icon = if is_dark { "☀️" } else { "🌙" };
+                    let tooltip = if is_dark { "Switch to Light Theme" } else { "Switch to Dark Theme" };
+                    if ui.button(icon).on_hover_text(tooltip).clicked() {
+                        let new_dark = !is_dark;
+                        self.dark_mode = Some(new_dark);
+                        let visuals = if new_dark {
+                            egui::Visuals::dark()
+                        } else {
+                            egui::Visuals::light()
+                        };
+                        ctx.set_visuals(visuals.clone());
+                        ui.style_mut().visuals = visuals;
+                        self.save_settings();
                     }
-                    self.save_settings();
-                }
+                });
             });
+            
+            ui.separator();
+            
+            match self.selected_tab {
+                0 => self.render_applications_tab(ui),
+                1 => self.render_settings_tab(ui),
+                2 => self.render_logs_tab(ui),
+                3 => self.render_manual_thinning_tab(ui),
+                4 => self.render_about_tab(ui),
+                _ => unreachable!(),
+            }
+            
+            // Show elevated permission dialog if needed
+            if self.show_elevated_dialog {
+                self.render_elevated_dialog(ui.ctx());
+            }
+            
+            // Show success dialog if needed
+            if self.show_success_dialog {
+                self.render_success_dialog(ui.ctx());
+            }
         });
-        
-        ui.separator();
-        
-        match self.selected_tab {
-            0 => self.render_applications_tab(ui),
-            1 => self.render_settings_tab(ui),
-            2 => self.render_logs_tab(ui),
-            3 => self.render_manual_thinning_tab(ui),
-            4 => self.render_about_tab(ui),
-            _ => unreachable!(),
-        }
-        
-        // Show elevated permission dialog if needed
-        if self.show_elevated_dialog {
-            self.render_elevated_dialog(&ctx);
-        }
-        
-        // Show success dialog if needed
-        if self.show_success_dialog {
-            self.render_success_dialog(&ctx);
-        }
         
         // Request continuous updates while scanning
         if self.is_scanning {
