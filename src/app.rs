@@ -1024,8 +1024,11 @@ impl ArchifyApp {
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
         
-        ui.label("Target Architecture:");
-        ui.text_edit_singleline(&mut self.processing_config.target_architecture);
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.processing_config.target_architecture, "x86_64".to_string(), "x86_64");
+            ui.radio_value(&mut self.processing_config.target_architecture, "arm64".to_string(), "arm64");
+            ui.radio_value(&mut self.processing_config.target_architecture, "arm64e".to_string(), "arm64e");
+        });
         
         ui.checkbox(&mut self.processing_config.no_sign, "Don't sign binaries");
         ui.checkbox(&mut self.processing_config.no_entitlements, "Don't preserve entitlements");
