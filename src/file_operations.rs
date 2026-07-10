@@ -131,15 +131,7 @@ impl FileOperations {
     /// Determine the type of app based on architectures
     fn determine_app_type(architectures: &[String]) -> AppType {
         if architectures.len() > 1 {
-            // Only mark as universal if both x86_64 and arm64 are present
-            let has_x86_64 = architectures.iter().any(|arch| arch == "x86_64");
-            let has_arm64 = architectures.iter().any(|arch| arch == "arm64" || arch == "arm64e");
-            
-            if has_x86_64 && has_arm64 {
             AppType::Universal
-            } else {
-                AppType::Other
-            }
         } else if architectures.is_empty() {
             AppType::Other
         } else {

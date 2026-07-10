@@ -48,6 +48,8 @@ impl BinaryProcessor {
             (CPU_TYPE_ARM, 6) => "armv6".to_string(), // CPU_SUBTYPE_ARM_V6 = 6
             (CPU_TYPE_ARM, 13) => "armv8".to_string(), // CPU_SUBTYPE_ARM_V8 = 13
             (CPU_TYPE_ARM, _) => "arm".to_string(),
+            (18, _) => "ppc".to_string(), // CPU_TYPE_POWERPC = 18
+            (16777234, _) => "ppc64".to_string(), // CPU_TYPE_POWERPC64 = 18 | 0x01000000 = 16777234
             _ => format!("{}:{}", cputype, cpusubtype),
         }
     }
@@ -113,28 +115,22 @@ impl BinaryProcessor {
             return Ok(logs);
         }
 
-        // Check if the target architecture is available
+        // Split target architectures (comma-separated list of archs to keep)
+        let target_archs: Vec<&str> = target_arch.split(',').collect();
         let archs = Self::get_architectures(path)?;
-        if !archs.contains(&target_arch.to_string()) {
-            let msg = format!(
-                "Target architecture {} not found in binary. Available: {:?}",
-                target_arch, archs
-            );
-            warn!("{}", msg);
-            logs.push(LogMessage {
-                timestamp: chrono::Utc::now(),
-                level: LogLevel::Warning,
-                message: msg,
-            });
-            return Ok(logs);
-        }
 
-        // Check if binary already has only the target architecture
-        if archs.len() == 1 && archs[0] == target_arch {
+        // Find which slices to remove (slices present in binary but not in target_archs)
+        let to_remove: Vec<String> = archs
+            .iter()
+            .cloned()
+            .filter(|arch| !target_archs.contains(&arch.as_str()))
+            .collect();
+
+        if to_remove.is_empty() {
             let msg = format!(
-                "Binary {} already has only target architecture {}",
+                "Binary {} already has only target architectures {:?}",
                 path.display(),
-                target_arch
+                target_archs
             );
             info!("{}", msg);
             logs.push(LogMessage {
@@ -145,16 +141,33 @@ impl BinaryProcessor {
             return Ok(logs);
         }
 
-        // Use lipo to thin the binary in-place (like the original archify app)
-        let output = TokioCommand::new("lipo")
-            .arg(path)
-            .arg("-thin")
-            .arg(target_arch)
-            .arg("-output")
-            .arg(path)
-            .output()
+        // If we would remove all architectures, skip to avoid empty binary
+        if to_remove.len() == archs.len() {
+            let msg = format!(
+                "Skipping binary {}: no matching target architectures found. Available: {:?}",
+                path.display(),
+                archs
+            );
+            warn!("{}", msg);
+            logs.push(LogMessage {
+                timestamp: chrono::Utc::now(),
+                level: LogLevel::Warning,
+                message: msg,
+            });
+            return Ok(logs);
+        }
+
+        // Use lipo to remove unwanted architectures in-place
+        let mut cmd = TokioCommand::new("lipo");
+        cmd.arg(path);
+        for arch in &to_remove {
+            cmd.arg("-remove").arg(arch);
+        }
+        cmd.arg("-output").arg(path);
+
+        let output = cmd.output()
             .await
-            .context("Failed to execute lipo -thin")?;
+            .context("Failed to execute lipo -remove")?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
@@ -169,9 +182,10 @@ impl BinaryProcessor {
         }
 
         let msg = format!(
-            "Successfully thinned binary {} to {} architecture",
+            "Successfully thinned binary {} (removed {:?}, kept {:?})",
             path.display(),
-            target_arch
+            to_remove,
+            target_archs
         );
         info!("{}", msg);
         logs.push(LogMessage {

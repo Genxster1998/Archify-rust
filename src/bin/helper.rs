@@ -160,7 +160,7 @@ async fn thin_binary(binary_path: &str, target_arch: &str, no_sign: bool, use_co
     let arch_info = String::from_utf8_lossy(&arch_output.stdout);
     let current_archs: Vec<&str> = arch_info
         .split_whitespace()
-        .filter(|&arch| ["x86_64", "arm64", "arm64e"].contains(&arch))
+        .filter(|&arch| ["x86_64", "arm64", "arm64e", "i386", "ppc", "ppc64"].contains(&arch))
         .collect();
 
     if current_archs.is_empty() {
@@ -170,24 +170,40 @@ async fn thin_binary(binary_path: &str, target_arch: &str, no_sign: bool, use_co
 
     eprintln!("[HELPER] Current architectures: {:?}", current_archs);
 
-    // Check if binary already has only the target architecture
-    if current_archs.len() == 1 && current_archs[0] == target_arch {
-        eprintln!("[HELPER] Binary already has only target architecture: {}", binary_path);
+    // Split target architectures (comma-separated list of archs to keep)
+    let target_archs: Vec<&str> = target_arch.split(',').collect();
+
+    // Find which slices to remove (slices present in binary but not in target_archs)
+    let to_remove: Vec<&str> = current_archs
+        .iter()
+        .cloned()
+        .filter(|arch| !target_archs.contains(arch))
+        .collect();
+
+    if to_remove.is_empty() {
+        eprintln!("[HELPER] Binary already has only target architectures: {:?}", target_archs);
         return true;
     }
 
-    // Use lipo -thin for in-place thinning
-    let status = Command::new("lipo")
-        .arg(binary_path)
-        .arg("-thin")
-        .arg(target_arch)
-        .arg("-output")
-        .arg(binary_path)
-        .status();
+    // Check if we are removing all slices (which is invalid)
+    if to_remove.len() == current_archs.len() {
+        eprintln!("[HELPER] Skipping: no matching architectures to keep in: {}", binary_path);
+        return true; // Skipping is considered success for the batch flow
+    }
+
+    // Use lipo -remove for in-place thinning
+    let mut cmd = Command::new("lipo");
+    cmd.arg(binary_path);
+    for arch in &to_remove {
+        cmd.arg("-remove").arg(arch);
+    }
+    cmd.arg("-output").arg(binary_path);
+
+    let status = cmd.status();
 
     match status {
         Ok(status) if status.success() => {
-            eprintln!("[HELPER] Successfully thinned: {}", binary_path);
+            eprintln!("[HELPER] Successfully thinned: {} (removed {:?})", binary_path, to_remove);
             
             // Sign the binary if needed
             if !no_sign {

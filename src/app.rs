@@ -123,6 +123,7 @@ impl ArchifyApp {
             selected_apps: Vec::new(),
             processing_config: ProcessingConfig {
                 target_architecture: "x86_64".to_string(),
+                target_architectures: None,
                 no_sign: true,
                 no_entitlements: false,
                 use_codesign: false,
@@ -131,6 +132,7 @@ impl ArchifyApp {
             batch_config: BatchProcessingConfig {
                 processing_config: ProcessingConfig {
                     target_architecture: "x86_64".to_string(),
+                    target_architectures: None,
                     no_sign: true,
                     no_entitlements: false,
                     use_codesign: false,
@@ -185,6 +187,9 @@ impl ArchifyApp {
 
         if let Some(s) = settings {
             app.processing_config = s.processing_config;
+            if app.processing_config.target_architectures.is_none() {
+                app.processing_config.target_architectures = Some(vec![app.processing_config.target_architecture.clone()]);
+            }
             app.batch_config = s.batch_config;
             app.custom_scan_dirs = s.custom_scan_dirs;
             app.scan_depth = s.scan_depth;
@@ -1024,10 +1029,30 @@ impl ArchifyApp {
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
         
+        ui.label("Target Architectures to Keep:");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.processing_config.target_architecture, "x86_64".to_string(), "x86_64");
-            ui.radio_value(&mut self.processing_config.target_architecture, "arm64".to_string(), "arm64");
-            ui.radio_value(&mut self.processing_config.target_architecture, "arm64e".to_string(), "arm64e");
+            if self.processing_config.target_architectures.is_none() {
+                self.processing_config.target_architectures = Some(vec![self.processing_config.target_architecture.clone()]);
+            }
+            
+            if let Some(ref mut archs) = self.processing_config.target_architectures {
+                let possible_archs = ["x86_64", "arm64", "arm64e", "i386", "ppc", "ppc64"];
+                for &arch in &possible_archs {
+                    let mut is_checked = archs.contains(&arch.to_string());
+                    if ui.checkbox(&mut is_checked, arch).changed() {
+                        if is_checked {
+                            if !archs.contains(&arch.to_string()) {
+                                archs.push(arch.to_string());
+                            }
+                        } else {
+                            if archs.len() > 1 {
+                                archs.retain(|a| a != arch);
+                            }
+                        }
+                    }
+                }
+                self.processing_config.target_architecture = archs.join(",");
+            }
         });
         
         ui.checkbox(&mut self.processing_config.no_sign, "Don't sign binaries");

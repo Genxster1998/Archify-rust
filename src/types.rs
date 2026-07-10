@@ -53,6 +53,7 @@ impl std::fmt::Display for AppSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingConfig {
     pub target_architecture: String,
+    pub target_architectures: Option<Vec<String>>,
     pub no_sign: bool,
     pub no_entitlements: bool,
     pub use_codesign: bool,
@@ -61,8 +62,15 @@ pub struct ProcessingConfig {
 
 impl Default for ProcessingConfig {
     fn default() -> Self {
+        let system_arch = get_system_architecture();
+        let target_archs = match system_arch.as_str() {
+            "arm64" | "arm64e" => vec!["arm64".to_string(), "arm64e".to_string()],
+            "x86_64" => vec!["x86_64".to_string()],
+            _ => vec![system_arch.clone()],
+        };
         Self {
-            target_architecture: get_system_architecture(),
+            target_architecture: target_archs.join(","),
+            target_architectures: Some(target_archs),
             no_sign: true,
             no_entitlements: true,
             use_codesign: false,
