@@ -1434,6 +1434,7 @@ impl ArchifyApp {
         };
         
         egui::Window::new(title)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -1443,7 +1444,7 @@ impl ArchifyApp {
                 });
                 
                 // Use scrollable area for long messages
-                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([true, true]).show(ui, |ui| {
                     // Split message into lines for better formatting
                     for line in self.success_message.lines() {
                         if line.starts_with("• ") {
