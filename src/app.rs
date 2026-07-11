@@ -408,19 +408,28 @@ impl ArchifyApp {
         let elevated_apps = if elevated { apps.clone() } else { Vec::new() };
 
         let runtime = RUNTIME.get().expect("Runtime not initialized");
+        let tx_clone = tx.clone();
         runtime.spawn(async move {
-            if let Err(e) = FileOperations::batch_process_apps_with_permissions(apps, &config, tx.clone(), elevated_apps).await {
-                let _ = tx.send(LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Error,
-                    message: format!("Batch processing failed: {}", e),
-                }).await;
+            let res = FileOperations::batch_process_apps_with_permissions(apps, &config, tx_clone.clone(), elevated_apps).await;
+            
+            let permission_type = if elevated { "elevated" } else { "user" };
+            match res {
+                Ok(_) => {
+                    let _ = tx_clone.send(LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Info,
+                        message: format!("{} processing completed", permission_type),
+                    }).await;
+                }
+                Err(e) => {
+                    let _ = tx_clone.send(LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Error,
+                        message: format!("Batch processing failed: {}", e),
+                    }).await;
+                }
             }
         });
-
-        self.is_processing = false;
-        let permission_type = if elevated { "elevated" } else { "user" };
-        self.add_log(LogLevel::Info, format!("{} processing completed", permission_type));
     }
 
     pub fn confirm_elevated_processing(&mut self) {
@@ -540,18 +549,26 @@ impl ArchifyApp {
         let config = self.batch_config.clone();
 
         let runtime = RUNTIME.get().expect("Runtime not initialized");
+        let tx_clone = tx.clone();
         runtime.spawn(async move {
-            if let Err(e) = FileOperations::batch_process_binaries(normal_binaries, &config, tx.clone()).await {
-                let _ = tx.send(LogMessage {
-                    timestamp: chrono::Utc::now(),
-                    level: LogLevel::Error,
-                    message: format!("Manual thinning failed: {}", e),
-                }).await;
+            let res = FileOperations::batch_process_binaries(normal_binaries, &config, tx_clone.clone()).await;
+            match res {
+                Ok(_) => {
+                    let _ = tx_clone.send(LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Info,
+                        message: "Manual binary processing completed".to_string(),
+                    }).await;
+                }
+                Err(e) => {
+                    let _ = tx_clone.send(LogMessage {
+                        timestamp: chrono::Utc::now(),
+                        level: LogLevel::Error,
+                        message: format!("Manual thinning failed: {}", e),
+                    }).await;
+                }
             }
         });
-
-        self.is_processing = false;
-        self.add_log(LogLevel::Info, "Manual binary processing started".to_string());
     }
 
     fn add_log(&mut self, level: LogLevel, message: String) {
@@ -562,8 +579,9 @@ impl ArchifyApp {
         });
     }
 
-    fn analyze_processing_results(&self) -> (Vec<(String, String)>, u64) {
+    fn analyze_processing_results(&self) -> (Vec<(String, String)>, Vec<(String, String)>, u64) {
         let mut failed_apps = Vec::new();
+        let mut skipped_apps = Vec::new();
         let mut total_saved = 0u64;
         
         // Look for failure patterns in logs
@@ -578,10 +596,10 @@ impl ArchifyApp {
                 }
             }
             
+            let message = &log.message;
+            
             // Look for app failure patterns
             if matches!(log.level, LogLevel::Error) {
-                let message = &log.message;
-                
                 // Pattern 1: "Failed to thin {app_path}: {reason}"
                 if message.contains("Failed to thin") {
                     if let Some(app_part) = message.strip_prefix("Failed to thin ") {
@@ -679,13 +697,111 @@ impl ArchifyApp {
                     failed_apps.push(("Unknown App".to_string(), error_msg));
                 }
             }
+            
+            // Look for warnings / unprocessed files
+            if matches!(log.level, LogLevel::Warning) {
+                if message.contains("File is read-only") {
+                    let app_name = if message.contains(".app") {
+                        if let Some(app_idx) = message.find(".app") {
+                            let start = message[..app_idx].rfind('/').map(|i| i + 1).unwrap_or(0);
+                            message[start..app_idx + 4].to_string()
+                        } else {
+                            "Read-Only App".to_string()
+                        }
+                    } else {
+                        "Read-Only App".to_string()
+                    };
+                    skipped_apps.push((app_name, "File is read-only (inaccessible/locked)".to_string()));
+                }
+                else if message.contains("no matching target architectures") {
+                    let app_name = if message.contains(".app") {
+                        if let Some(app_idx) = message.find(".app") {
+                            let start = message[..app_idx].rfind('/').map(|i| i + 1).unwrap_or(0);
+                            message[start..app_idx + 4].to_string()
+                        } else {
+                            "Compatible App".to_string()
+                        }
+                    } else {
+                        "Compatible App".to_string()
+                    };
+                    skipped_apps.push((app_name, "No matching target architecture slices found".to_string()));
+                }
+                else if message.contains("ldid not found") {
+                    skipped_apps.push(("Signing".to_string(), "ldid not found, skipped signing".to_string()));
+                }
+                else if message.contains("Failed to sign") {
+                    skipped_apps.push(("Signing".to_string(), "Failed to sign binary".to_string()));
+                }
+            }
         }
         
         // Remove duplicates and sort
         failed_apps.sort();
         failed_apps.dedup();
         
-        (failed_apps, total_saved)
+        skipped_apps.sort();
+        skipped_apps.dedup();
+        
+        (failed_apps, skipped_apps, total_saved)
+    }
+
+    fn build_success_message(
+        &self,
+        has_error_message: bool,
+        timeout_elapsed: bool,
+        has_completion_message: bool,
+    ) -> String {
+        let (failed_apps, skipped_apps, total_saved) = self.analyze_processing_results();
+        
+        if has_error_message {
+            if failed_apps.is_empty() && skipped_apps.is_empty() {
+                "⚠ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string()
+            } else {
+                let mut message = String::new();
+                if !failed_apps.is_empty() {
+                    message.push_str(&format!("⚠ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len()));
+                    for (app_name, reason) in &failed_apps {
+                        message.push_str(&format!("• {}: {}\n", app_name, reason));
+                    }
+                }
+                if !skipped_apps.is_empty() {
+                    if !message.is_empty() {
+                        message.push_str("\n");
+                    }
+                    message.push_str(&format!("⚠ Some files were skipped/unprocessed ({} apps/files):\n\n", skipped_apps.len()));
+                    for (app_name, reason) in &skipped_apps {
+                        message.push_str(&format!("• {}: {}\n", app_name, reason));
+                    }
+                }
+                if total_saved > 0 {
+                    message.push_str(&format!("\n✔ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
+                }
+                message.push_str("\n\nℹ Tip: Check the Logs tab for detailed information.");
+                message
+            }
+        } else if timeout_elapsed && !has_completion_message {
+            "✔ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string()
+        } else {
+            // No errors, but check if there are skipped files/warnings
+            if !skipped_apps.is_empty() {
+                let mut message = format!("⚠ Binary thinning completed, but some files were skipped/unprocessed:\n\n");
+                for (app_name, reason) in &skipped_apps {
+                    message.push_str(&format!("• {}: {}\n", app_name, reason));
+                }
+                if total_saved > 0 {
+                    message.push_str(&format!("\n✔ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
+                }
+                message.push_str("\n\nℹ Tip: Check the Logs tab for details on why these files were skipped.");
+                message
+            } else if total_saved > 0 {
+                format!(
+                    "✔ Binary thinning completed successfully!\n\nTotal space saved: {}",
+                    FileOperations::human_readable_size(total_saved, 2)
+                )
+            } else {
+                "✔ Binary thinning completed successfully!".to_string()
+            }
+        }
     }
 
     pub fn handle_helper_logs(&mut self) {
@@ -695,7 +811,7 @@ impl ArchifyApp {
             }
             
             // Check if helper processing is complete
-            if self.was_processing && !self.is_processing {
+            if self.was_processing && self.is_processing {
                 let has_completion_message = self.logs.iter().any(|log| {
                     log.message.contains("Elevated processing completed") ||
                     log.message.contains("processing completed") || 
@@ -716,60 +832,33 @@ impl ArchifyApp {
                 };
                 
                 if has_completion_message || has_error_message || timeout_elapsed {
-                    self.show_success_dialog = true;
-                    self.was_processing = false;
-                    self.processing_start_time = None;
-                    
-                    if has_error_message {
-                        // Analyze failures and generate detailed message
-                        let (failed_apps, total_saved) = self.analyze_processing_results();
-                        
-                        if failed_apps.is_empty() {
-                            // No specific app failures, just general errors
-                            self.success_message = "⚠ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string();
-                        } else {
-                            // Build detailed failure message
-                            let mut message = format!("⚠ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len());
-                            
-                            for (app_name, reason) in &failed_apps {
-                                message.push_str(&format!("• {}: {}\n", app_name, reason));
-                            }
-                            
-                            if total_saved > 0 {
-                                message.push_str(&format!("\n✔ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
-                            }
-                            
-                            message.push_str("\n\nℹ Tip: Check the Logs tab for detailed information about each failure.");
-                            
-                            self.success_message = message;
-                        }
-                    } else if timeout_elapsed && !has_completion_message {
-                        self.success_message = "✔ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
-                    } else {
-                        // Calculate total saved space from logs
-                        let mut total_saved = 0u64;
-                        for log in &self.logs {
-                            if log.message.contains("saved") && log.message.contains("bytes") {
-                                // Try to extract saved space from log messages
-                                if let Some(saved_str) = log.message.split_whitespace()
-                                    .find(|word| word.parse::<u64>().is_ok()) {
-                                    if let Ok(saved) = saved_str.parse::<u64>() {
-                                        total_saved += saved;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if total_saved > 0 {
-                            self.success_message = format!(
-                                "✔ Binary thinning completed successfully!\n\nTotal space saved: {}",
-                                FileOperations::human_readable_size(total_saved, 2)
-                            );
-                        } else {
-                            self.success_message = "✔ Binary thinning completed successfully!".to_string();
-                        }
-                    }
+                    self.is_processing = false;
                 }
+            }
+
+            if self.was_processing && !self.is_processing {
+                let has_completion_message = self.logs.iter().any(|log| {
+                    log.message.contains("Elevated processing completed") ||
+                    log.message.contains("processing completed") || 
+                    log.message.contains("thinning completed") ||
+                    log.message.contains("Batch processing completed")
+                });
+                
+                let has_error_message = self.logs.iter().any(|log| {
+                    matches!(log.level, LogLevel::Error) && 
+                    (log.message.contains("failed") || log.message.contains("error"))
+                });
+                
+                let timeout_elapsed = if let Some(start_time) = self.processing_start_time {
+                    start_time.elapsed().as_secs() > 5
+                } else {
+                    false
+                };
+
+                self.show_success_dialog = true;
+                self.was_processing = false;
+                self.processing_start_time = None;
+                self.success_message = self.build_success_message(has_error_message, timeout_elapsed, has_completion_message);
             }
         }
     }
@@ -780,8 +869,8 @@ impl ArchifyApp {
                 self.logs.push(log);
             }
             
-            // Check if processing is complete by looking for completion messages
-            if self.was_processing && !self.is_processing {
+            // Check if processing is complete
+            if self.was_processing && self.is_processing {
                 let has_completion_message = self.logs.iter().any(|log| {
                     log.message.contains("processing completed") || 
                     log.message.contains("thinning completed") ||
@@ -801,60 +890,34 @@ impl ArchifyApp {
                 };
                 
                 if has_completion_message || has_error_message || timeout_elapsed {
-                    self.show_success_dialog = true;
-                    self.was_processing = false;
-                    self.processing_start_time = None;
-                    
-                    if has_error_message {
-                        // Analyze failures and generate detailed message
-                        let (failed_apps, total_saved) = self.analyze_processing_results();
-                        
-                        if failed_apps.is_empty() {
-                            // No specific app failures, just general errors
-                            self.success_message = "⚠ Binary thinning completed with some errors.\n\nPlease check the logs tab for details.".to_string();
-                        } else {
-                            // Build detailed failure message
-                            let mut message = format!("⚠ Binary thinning completed with {} app(s) failed.\n\n", failed_apps.len());
-                            
-                            for (app_name, reason) in &failed_apps {
-                                message.push_str(&format!("• {}: {}\n", app_name, reason));
-                            }
-                            
-                            if total_saved > 0 {
-                                message.push_str(&format!("\n✔ Total space saved: {}", FileOperations::human_readable_size(total_saved, 2)));
-                            }
-                            
-                            message.push_str("\n\nℹ Tip: Check the Logs tab for detailed information about each failure.");
-                            
-                            self.success_message = message;
-                        }
-                    } else if timeout_elapsed && !has_completion_message {
-                        self.success_message = "✔ Binary thinning appears to have completed.\n\nProcessing may have finished in the background.".to_string();
-                    } else {
-                        // Calculate total saved space from logs
-                        let mut total_saved = 0u64;
-                        for log in &self.logs {
-                            if log.message.contains("saved") && log.message.contains("bytes") {
-                                // Try to extract saved space from log messages
-                                if let Some(saved_str) = log.message.split_whitespace()
-                                    .find(|word| word.parse::<u64>().is_ok()) {
-                                    if let Ok(saved) = saved_str.parse::<u64>() {
-                                        total_saved += saved;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if total_saved > 0 {
-                            self.success_message = format!(
-                                "✔ Binary thinning completed successfully!\n\nTotal space saved: {}",
-                                FileOperations::human_readable_size(total_saved, 2)
-                            );
-                        } else {
-                            self.success_message = "✔ Binary thinning completed successfully!".to_string();
-                        }
-                    }
+                    self.is_processing = false;
                 }
+            }
+
+            // Check if processing is complete by looking for completion messages
+            if self.was_processing && !self.is_processing {
+                let has_completion_message = self.logs.iter().any(|log| {
+                    log.message.contains("processing completed") || 
+                    log.message.contains("thinning completed") ||
+                    log.message.contains("Batch processing completed")
+                });
+                
+                let has_error_message = self.logs.iter().any(|log| {
+                    matches!(log.level, LogLevel::Error) && 
+                    (log.message.contains("failed") || log.message.contains("error"))
+                });
+                
+                let timeout_elapsed = if let Some(start_time) = self.processing_start_time {
+                    start_time.elapsed().as_secs() > 5
+                } else {
+                    false
+                };
+                
+                self.show_success_dialog = true;
+                self.was_processing = false;
+                self.processing_start_time = None;
+                
+                self.success_message = self.build_success_message(has_error_message, timeout_elapsed, has_completion_message);
             }
         }
     }
@@ -901,9 +964,6 @@ impl ArchifyApp {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_only_universal, "Show only universal binaries")
                 .on_hover_text("Only show applications that contain multiple architectures (Fat Binaries).");
-            if self.show_only_universal {
-                ui.label("(Filtering universal binaries only)");
-            }
         });
         
         ui.horizontal(|ui| {
